@@ -14,6 +14,7 @@ Modified by
 import glob
 import gzip
 import h5py
+import itertools
 import numpy as np
 import os
 import sys
@@ -29,7 +30,7 @@ DATA_DIR = f'{os.path.dirname(__file__)}/../../../structure_files/atom_sites'
 BASE_POINT_CLOUD_DIR = os.path.join(DATA_DIR, "point_clouds")
 POINT_CLOUD_HDF5 = lambda x, y: f"{POINT_CLOUD_DIR(x)}/{y}_protein_point_clouds.hdf5"
 
-EVAL_PCT = 0.1
+EVAL_PCT = 0.2
 
 
 def get_point_cloud_dir(name):
@@ -183,16 +184,23 @@ def load_labels():
     def get_index_of_function_label(function, function_arr):
         return function_arr.get(function)
 
-    functions = pd.read_parquet(f"{DATA_DIR}/alphafold_protein_to_parent_gomf_only.parquet")
-    functions["parent_gomf_w_name"] = functions.parent_gomf + "|" + functions.parent_gomf_name
-    unique_functions = sorted(functions.parent_gomf_w_name.dropna().unique())
+    functions = pd.read_parquet(f"{DATA_DIR}/protein_goa_mf_parent_only.parquet")
+    unique_functions = sorted(functions.parent_mf.dropna().unique())
+    print("num unique function labels: ", len(unique_functions))
 
     functions_to_index = {function: int(i) for i, function in enumerate(unique_functions)}
-    functions['function_idx'] = functions.parent_gomf_w_name.apply(
+    functions['function_idx'] = functions.parent_mf.apply(
         lambda x: get_index_of_function_label(x, functions_to_index)
     )
     protein_to_function_labels = functions.groupby("protein_id").function_idx.agg(lambda x: sorted(list(set(x.dropna()))))
     return protein_to_function_labels.to_dict()
+
+
+def get_ic_vec(labels_dict):
+    N = len(labels_dict)
+    m = pd.Series(list(itertools.chain(*list(labels_dict.values())))).value_counts()
+    ic = -np.log(m.sort_index()/N)
+    return ic
 
 
 def translate_pointcloud(pointcloud):
@@ -282,7 +290,7 @@ class ProteinsExtended(Dataset):
         
 class ProteinsExtendedWithMask(Dataset):
     def __init__(self, num_points, partition='train'):
-        self.num_label_categories = 18
+        self.num_label_categories = 19
         self.num_points = num_points
         self.partition = partition
         self.max_points = 4000
@@ -291,8 +299,8 @@ class ProteinsExtendedWithMask(Dataset):
     def load_data_cls(self, partition, overwrite=False):
         if not os.path.exists(DATA_DIR):
             raise Exception("first download structure_files into project root")
-        create_protein_point_clouds(name="sequence_head_w_confidence_mask", num_points=self.max_points, overwrite=overwrite)
-        all_id, all_data, all_label = read_point_clouds_w_labels_as_hd5f(name="sequence_head_w_confidence_mask", partition=partition)
+        create_protein_point_clouds(name="confidence_mask_new_labels", num_points=self.max_points, overwrite=overwrite)
+        all_id, all_data, all_label = read_point_clouds_w_labels_as_hd5f(name="confidence_mask_new_labels", partition=partition)
         print(all_id.shape)
         print(all_data.shape)
         print(all_label.shape)
@@ -303,7 +311,7 @@ class ProteinsExtendedWithMask(Dataset):
         _id = self.id[item]
         pointcloud = self.data[item]
         label = self.label[item]
-        if self.partition == 'train':
+        if self.partition in ('train', 'all_with_labels'):
             pointcloud = rotate_pointcloud(pointcloud)
             # pointcloud = translate_pointcloud(pointcloud)
             # pointcloud = jitter_pointcloud(pointcloud)
@@ -317,5 +325,5 @@ class ProteinsExtendedWithMask(Dataset):
 point_cloud_method_by_name = {
     "sampled": protein_to_sampled_point_cloud,
     "sequence_head": protein_to_sampled_point_cloud,
-    "sequence_head_w_confidence_mask": protein_to_masked_point_cloud,
+    "confidence_mask_new_labels": protein_to_masked_point_cloud,
 }

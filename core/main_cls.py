@@ -12,13 +12,15 @@ Modified by
 
 from __future__ import print_function
 import os
+import pandas as pd
 import argparse
+import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
-from data import ProteinsSampled, ProteinsExtended, ProteinsExtendedWithMask
+from data import ProteinsSampled, ProteinsExtended, ProteinsExtendedWithMask, get_ic_vec, load_labels
 from models.curvenet_cls import CurveNet, CurveNetWithLSTMHead
 import numpy as np
 from torch.utils.data import DataLoader
@@ -59,8 +61,9 @@ def train(args, io):
     # create model
     num_classes = train_loader.dataset.num_label_categories
     
-    icvec = np.ones((num_classes,))#np.load(args.icvec_file).astype(np.float32)
-    assert icvec.size == num_classes
+    icvec_np = get_ic_vec(load_labels()).to_numpy()
+    assert icvec_np.size == num_classes
+    icvec = torch.from_numpy(icvec_np).to(device)
     
     model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
     model = nn.DataParallel(model)
@@ -77,7 +80,7 @@ def train(args, io):
     elif args.scheduler == 'step':
         scheduler = MultiStepLR(opt, [120, 160], gamma=0.1)
     
-    criterion = cal_loss
+    criterion = lambda x, y: cal_loss(x, y, smoothing=False, weight=icvec)
 
     best_test_fmax = 0
     for epoch in range(args.epochs):
@@ -116,7 +119,7 @@ def train(args, io):
         train_true = np.concatenate(train_true)
         train_prob = np.concatenate(train_prob)
         
-        train_eval_metrics = evaluate(train_true, train_prob, icvec, nth=10)
+        train_eval_metrics = evaluate(train_true, train_prob, icvec_np, nth=10)
         outstr = 'Train %d, loss: %.6f, ' % (epoch, train_loss*1.0/count) + "train metrics: {}".format({k: "%.6f" % v for k, v in train_eval_metrics.items()})
         io.cprint(outstr)
 
@@ -143,7 +146,7 @@ def train(args, io):
             test_true = np.concatenate(test_true)
             test_prob = np.concatenate(test_prob)
         
-        test_eval_metrics = evaluate(test_true, test_prob, icvec, nth=10)
+        test_eval_metrics = evaluate(test_true, test_prob, icvec_np, nth=10)
         outstr = 'Test %d, loss: %.6f, ' % (epoch, test_loss*1.0/count) + "test metrics: {}".format({k: "%.6f" % v for k, v in test_eval_metrics.items()})
         io.cprint(outstr)
         test_fmax = test_eval_metrics['avg_fmax']
@@ -274,7 +277,7 @@ def embed(args, io):
     _embeddings = []
     _probs = []
     _labels = []
-    for protein_id, data, label in all_loader:
+    for protein_id, data, label in tqdm.tqdm(all_loader):
         data, label = data.float().to(device), label.to(device).squeeze()
         data = data.permute(0, 2, 1)
         batch_size = data.size()[0]
@@ -291,7 +294,8 @@ def embed(args, io):
     labels = np.concatenate(_labels)
     probs = np.concatenate(_probs)
     
-    df = pd.DataFrame({"protein_id": protein_ids, "curvenet_embeddings": embeddings, "goa_parent_labels": labels, "pred_prob": probs})
+    [print(arr[0]) for arr in (protein_ids, embeddings, labels, probs)]
+    df = pd.DataFrame({"protein_id": protein_ids, "curvenet_embeddings": embeddings.tolist(), "goa_parent_labels": labels.tolist(), "pred_prob": probs.tolist()})
     df.to_parquet(f"../checkpoints/{args.exp_name}/curvenet_embedding.parquet")
     
 

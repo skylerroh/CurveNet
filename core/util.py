@@ -15,13 +15,15 @@ from evaluation import *
 # import torch.nn.BCEWithLogitsLoss
 
 
-def cal_loss(pred, gold, smoothing=True):
+def cal_loss(pred, gold, smoothing=True, weight=None):
     ''' Calculate cross entropy loss, apply label smoothing if needed. '''
 
     # gold = gold.contiguous().view(-1)
+    if weight is not None:
+        weight = weight / weight.mean()
 
     if smoothing:
-        eps = 0.2
+        eps = 0.1
         
         one_hot = gold
         n_class = pred.size(1)
@@ -32,10 +34,13 @@ def cal_loss(pred, gold, smoothing=True):
             ((1 - one_hot) * eps / (n_class - n_lab)[:, None])
         
         log_prb = F.log_softmax(pred, dim=1)
+        
+        if weight is None:
+            weight = np.ones(n_class)
 
-        loss = -(one_hot * log_prb).sum(dim=1).mean()
+        loss = (-(one_hot * log_prb)*weight).sum(dim=1).mean()
     else:
-        loss = F.multilabel_soft_margin_loss(pred, gold)
+        loss = F.multilabel_soft_margin_loss(pred, gold, weight=weight)
 
     return loss
 

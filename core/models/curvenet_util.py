@@ -181,7 +181,7 @@ class LPFA(nn.Module):
     def __init__(self, in_channel, out_channel, k, mlp_num=2, initial=False, device=torch.device('cuda')):
         super(LPFA, self).__init__()
         self.k = k
-        self.device = torch.device("cpu")
+        self.device = device
         self.initial = initial
 
         if not initial:
