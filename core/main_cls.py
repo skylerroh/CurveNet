@@ -18,11 +18,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
-from data import Proteins
-from models.curvenet_cls import CurveNet
+from data import ProteinsSampled, ProteinsExtended, ProteinsExtendedWithMask
+from models.curvenet_cls import CurveNet, CurveNetWithLSTMHead
 import numpy as np
 from torch.utils.data import DataLoader
-from util import cal_loss, IOStream
+from util import cal_loss, IOStream, evaluate
 import sklearn.metrics as metrics
 
 
@@ -48,9 +48,9 @@ def _init_():
     os.system('cp models/curvenet_cls.py ../checkpoints/'+args.exp_name+'/curvenet_cls.py.backup')
 
 def train(args, io):
-    train_loader = DataLoader(Proteins(partition='train', num_points=args.num_points), num_workers=8,
+    train_loader = DataLoader(ProteinsExtendedWithMask(partition='train', num_points=args.num_points), num_workers=8,
                               batch_size=args.batch_size, shuffle=True, drop_last=True)
-    test_loader = DataLoader(Proteins(partition='test', num_points=args.num_points), num_workers=8,
+    test_loader = DataLoader(ProteinsExtendedWithMask(partition='test', num_points=args.num_points), num_workers=8,
                              batch_size=args.test_batch_size, shuffle=False, drop_last=False)
 
     device = torch.device("cuda" if args.cuda else "cpu")
@@ -58,7 +58,11 @@ def train(args, io):
 
     # create model
     num_classes = train_loader.dataset.num_label_categories
-    model = CurveNet(num_classes=num_classes).to(device)
+    
+    icvec = np.ones((num_classes,))#np.load(args.icvec_file).astype(np.float32)
+    assert icvec.size == num_classes
+    
+    model = CurveNet(k=32, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
     model = nn.DataParallel(model)
 
     if args.use_sgd:
@@ -75,7 +79,7 @@ def train(args, io):
     
     criterion = cal_loss
 
-    best_test_acc = 0
+    best_test_fmax = 0
     for epoch in range(args.epochs):
         ####################
         # Train
@@ -83,24 +87,23 @@ def train(args, io):
         train_loss = 0.0
         count = 0.0
         model.train()
-        train_pred = []
+        train_prob = []
         train_true = []
-        for data, label in train_loader:
-            multihot_label = torch.zeros(label.size(0), num_classes).scatter_(1, label, 1.)
-            data, multihot_label = data.to(device), multihot_label.to(device).squeeze()
+        for _id, data, multihot_label in train_loader:
+            data, multihot_label = data.to(device, dtype=torch.float), multihot_label.to(device)
             data = data.permute(0, 2, 1)
             batch_size = data.size()[0]
             opt.zero_grad()
-            logits = model(data)
+            logits = model(data)[0]
+            probs = torch.sigmoid(logits)
             loss = criterion(logits, multihot_label)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
             opt.step()
-            preds = logits.max(dim=1)[1]
             count += batch_size
             train_loss += loss.item() * batch_size
             train_true.append(multihot_label.cpu().numpy())
-            train_pred.append(preds.detach().cpu().numpy())
+            train_prob.append(probs.detach().cpu().numpy())
         if args.scheduler == 'cos':
             scheduler.step()
         elif args.scheduler == 'step':
@@ -111,10 +114,10 @@ def train(args, io):
                     param_group['lr'] = 1e-5
 
         train_true = np.concatenate(train_true)
-        train_pred = np.concatenate(train_pred)
-        outstr = 'Train %d, loss: %.6f, train acc: %.6f' % (epoch, train_loss*1.0/count,
-                                                                metrics.accuracy_score(
-                                                                    train_true, train_pred))
+        train_prob = np.concatenate(train_prob)
+        
+        train_eval_metrics = evaluate(train_true, train_prob, icvec, nth=10)
+        outstr = 'Train %d, loss: %.6f, ' % (epoch, train_loss*1.0/count) + "train metrics: {}".format({k: "%.6f" % v for k, v in train_eval_metrics.items()})
         io.cprint(outstr)
 
         ####################
@@ -123,28 +126,31 @@ def train(args, io):
         test_loss = 0.0
         count = 0.0
         model.eval()
-        test_pred = []
+        test_prob = []
         test_true = []
-        for data, multihot_label in test_loader:
-            data, multihot_label = data.to(device), multihot_label.to(device).squeeze()
-            data = data.permute(0, 2, 1)
-            batch_size = data.size()[0]
-            logits = model(data)
-            loss = criterion(logits, multihot_label)
-            preds = logits.max(dim=1)[1]
-            count += batch_size
-            test_loss += loss.item() * batch_size
-            test_true.append(multihot_label.cpu().numpy())
-            test_pred.append(preds.detach().cpu().numpy())
-        test_true = np.concatenate(test_true)
-        test_pred = np.concatenate(test_pred)
-        test_acc = metrics.accuracy_score(test_true, test_pred)
-        outstr = 'Test %d, loss: %.6f, test acc: %.6f' % (epoch, test_loss*1.0/count, test_acc)
+        with torch.no_grad():   # set all 'requires_grad' to False
+            for _id, data, multihot_label in test_loader:
+                data, multihot_label = data.to(device, dtype=torch.float), multihot_label.to(device)
+                data = data.permute(0, 2, 1)
+                batch_size = data.size()[0]
+                logits = model(data)[0]
+                probs = torch.sigmoid(logits)
+                loss = criterion(logits, multihot_label)
+                count += batch_size
+                test_loss += loss.item() * batch_size
+                test_true.append(multihot_label.cpu().numpy())
+                test_prob.append(probs.detach().cpu().numpy())
+            test_true = np.concatenate(test_true)
+            test_prob = np.concatenate(test_prob)
+        
+        test_eval_metrics = evaluate(test_true, test_prob, icvec, nth=10)
+        outstr = 'Test %d, loss: %.6f, ' % (epoch, test_loss*1.0/count) + "test metrics: {}".format({k: "%.6f" % v for k, v in test_eval_metrics.items()})
         io.cprint(outstr)
-        if test_acc >= best_test_acc:
-            best_test_acc = test_acc
+        test_fmax = test_eval_metrics['avg_fmax']
+        if test_fmax >= best_test_fmax:
+            best_test_fmax = test_fmax
             torch.save(model.state_dict(), '../checkpoints/%s/models/model.t7' % args.exp_name)
-        io.cprint('best: %.3f' % best_test_acc)
+        io.cprint('best: %.3f' % best_test_fmax)
 
 def test(args, io):
     test_loader = DataLoader(Proteins(partition='test', num_points=args.num_points),
@@ -153,7 +159,7 @@ def test(args, io):
     device = torch.device("cuda" if args.cuda else "cpu")
 
     #Try to load models
-    model = CurveNet().to(device)
+    model = CurveNetWithLSTMHead(num_classes=num_classes).to(device)
     model = nn.DataParallel(model)
     model.load_state_dict(torch.load(args.model_path))
 
@@ -167,7 +173,7 @@ def test(args, io):
         data, label = data.to(device), label.to(device).squeeze()
         data = data.permute(0, 2, 1)
         batch_size = data.size()[0]
-        logits = model(data)
+        logits = model(data)[0]
         preds = logits.max(dim=1)[1]
         test_true.append(label.cpu().numpy())
         test_pred.append(preds.detach().cpu().numpy())
@@ -176,9 +182,43 @@ def test(args, io):
     test_acc = metrics.accuracy_score(test_true, test_pred)
     outstr = 'Test :: test acc: %.6f'%(test_acc)
     io.cprint(outstr)
+    
+
+def embed(args, io):
+    train_loader = DataLoader(ProteinsExtendedWithMask(partition='train', num_points=args.num_points), num_workers=8,
+                              batch_size=args.batch_size, shuffle=True, drop_last=True)
+    test_loader = DataLoader(ProteinsExtendedWithMask(partition='test', num_points=args.num_points), num_workers=8,
+                             batch_size=args.test_batch_size, shuffle=False, drop_last=False)
+
+    device = torch.device("cuda" if args.cuda else "cpu")
+
+    #Try to load models
+    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
+    model = nn.DataParallel(model)
+    model.load_state_dict(torch.load(args.model_path))
+
+    model = model.eval()
+    count = 0.0
+    protein_ids = []
+    embeddings = []
+    for protein_ids, data, label in test_loader:
+        data, label = data.to(device), label.to(device).squeeze()
+        data = data.permute(0, 2, 1)
+        batch_size = data.size()[0]
+        emb = model(data)[1]
+        embeddings.append(label.cpu().numpy())
+        protein_ids.append(protein_ids.detach().cpu().numpy())
+    # test_true = np.concatenate(test_true)
+    # test_pred = np.concatenate(test_pred)
+    # test_acc = metrics.accuracy_score(test_true, test_pred)
+    # outstr = 'Test :: test acc: %.6f'%(test_acc)
+    # io.cprint(outstr)
+    
 
 
 if __name__ == "__main__":
+    def str2bool(value):
+        return value.lower() == 'true'
     # Training settings
     parser = argparse.ArgumentParser(description='Point Cloud Recognition')
     parser.add_argument('--exp_name', type=str, default='exp', metavar='N',
@@ -191,7 +231,7 @@ if __name__ == "__main__":
                         help='Size of batch)')
     parser.add_argument('--epochs', type=int, default=200, metavar='N',
                         help='number of episode to train ')
-    parser.add_argument('--use_sgd', type=bool, default=True,
+    parser.add_argument('--use_sgd', type=str2bool, default=True,
                         help='Use SGD')
     parser.add_argument('--lr', type=float, default=0.001, metavar='LR',
                         help='learning rate (default: 0.001, 0.1 if using sgd)')
@@ -204,7 +244,7 @@ if __name__ == "__main__":
                         help='enables CUDA training')
     parser.add_argument('--eval', type=bool,  default=False,
                         help='evaluate the model')
-    parser.add_argument('--num_points', type=int, default=1024,
+    parser.add_argument('--num_points', type=int, default=2048,
                         help='num of points to use')
     parser.add_argument('--model_path', type=str, default='', metavar='N',
                         help='Pretrained model path')
