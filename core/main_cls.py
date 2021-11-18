@@ -62,7 +62,7 @@ def train(args, io):
     icvec = np.ones((num_classes,))#np.load(args.icvec_file).astype(np.float32)
     assert icvec.size == num_classes
     
-    model = CurveNet(k=32, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
+    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
     model = nn.DataParallel(model)
 
     if args.use_sgd:
@@ -159,7 +159,7 @@ def test(args, io):
     device = torch.device("cuda" if args.cuda else "cpu")
 
     #Try to load models
-    model = CurveNetWithLSTMHead(num_classes=num_classes).to(device)
+    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
     model = nn.DataParallel(model)
     model.load_state_dict(torch.load(args.model_path))
 
@@ -183,12 +183,83 @@ def test(args, io):
     outstr = 'Test :: test acc: %.6f'%(test_acc)
     io.cprint(outstr)
     
+    
+def train_all(args, io):
+    train_loader = DataLoader(ProteinsExtendedWithMask(partition='all_with_labels', num_points=args.num_points), num_workers=8,
+                              batch_size=args.batch_size, shuffle=True, drop_last=True)
+    device = torch.device("cuda" if args.cuda else "cpu")
+    io.cprint("Let's use" + str(torch.cuda.device_count()) + "GPUs!")
+
+    # create model
+    num_classes = train_loader.dataset.num_label_categories
+    
+    icvec = np.ones((num_classes,))#np.load(args.icvec_file).astype(np.float32)
+    assert icvec.size == num_classes
+    
+    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
+    model = nn.DataParallel(model)
+
+    if args.use_sgd:
+        io.cprint("Use SGD")
+        opt = optim.SGD(model.parameters(), lr=args.lr*100, momentum=args.momentum, weight_decay=1e-4)
+    else:
+        io.cprint("Use Adam")
+        opt = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+
+    if args.scheduler == 'cos':
+        scheduler = CosineAnnealingLR(opt, args.epochs, eta_min=1e-3)
+    elif args.scheduler == 'step':
+        scheduler = MultiStepLR(opt, [120, 160], gamma=0.1)
+    
+    criterion = cal_loss
+
+    for epoch in range(args.epochs):
+        ####################
+        # Train
+        ####################
+        train_loss = 0.0
+        count = 0.0
+        model.train()
+        train_prob = []
+        train_true = []
+        for _id, data, multihot_label in train_loader:
+            data, multihot_label = data.to(device, dtype=torch.float), multihot_label.to(device)
+            data = data.permute(0, 2, 1)
+            batch_size = data.size()[0]
+            opt.zero_grad()
+            logits = model(data)[0]
+            probs = torch.sigmoid(logits)
+            loss = criterion(logits, multihot_label)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+            opt.step()
+            count += batch_size
+            train_loss += loss.item() * batch_size
+            train_true.append(multihot_label.cpu().numpy())
+            train_prob.append(probs.detach().cpu().numpy())
+        if args.scheduler == 'cos':
+            scheduler.step()
+        elif args.scheduler == 'step':
+            if opt.param_groups[0]['lr'] > 1e-5:
+                scheduler.step()
+            if opt.param_groups[0]['lr'] < 1e-5:
+                for param_group in opt.param_groups:
+                    param_group['lr'] = 1e-5
+
+        train_true = np.concatenate(train_true)
+        train_prob = np.concatenate(train_prob)
+        
+        train_eval_metrics = evaluate(train_true, train_prob, icvec, nth=10)
+        outstr = 'Train %d, loss: %.6f, ' % (epoch, train_loss*1.0/count) + "train metrics: {}".format({k: "%.6f" % v for k, v in train_eval_metrics.items()})
+        io.cprint(outstr)
+        if epoch+1 % 25 == 0:
+            torch.save(model.state_dict(), f'../checkpoints/{args.exp_name}/models/model_{epoch+1}.t7')
+    
+    
 
 def embed(args, io):
-    train_loader = DataLoader(ProteinsExtendedWithMask(partition='train', num_points=args.num_points), num_workers=8,
+    all_loader = DataLoader(ProteinsExtendedWithMask(partition='all', num_points=args.num_points), num_workers=8,
                               batch_size=args.batch_size, shuffle=True, drop_last=True)
-    test_loader = DataLoader(ProteinsExtendedWithMask(partition='test', num_points=args.num_points), num_workers=8,
-                             batch_size=args.test_batch_size, shuffle=False, drop_last=False)
 
     device = torch.device("cuda" if args.cuda else "cpu")
 
@@ -199,20 +270,29 @@ def embed(args, io):
 
     model = model.eval()
     count = 0.0
-    protein_ids = []
-    embeddings = []
-    for protein_ids, data, label in test_loader:
+    _protein_ids = []
+    _embeddings = []
+    _probs = []
+    _labels = []
+    for protein_id, data, label in all_loader:
         data, label = data.to(device), label.to(device).squeeze()
         data = data.permute(0, 2, 1)
         batch_size = data.size()[0]
-        emb = model(data)[1]
-        embeddings.append(label.cpu().numpy())
-        protein_ids.append(protein_ids.detach().cpu().numpy())
-    # test_true = np.concatenate(test_true)
-    # test_pred = np.concatenate(test_pred)
-    # test_acc = metrics.accuracy_score(test_true, test_pred)
-    # outstr = 'Test :: test acc: %.6f'%(test_acc)
-    # io.cprint(outstr)
+        logits, emb = model(data)
+        probs = torch.sigmoid(logits)
+        
+        _protein_ids.append(protein_id)
+        _embeddings.append(embs.detach().cpu().numpy())
+        _probs.append(probs.detach().cpu().numpy())
+        _labels.append(label.detach().cpu().numpy())
+    
+    protein_ids = np.concatenate(_protein_ids)
+    embeddings = np.concatenate(_embeddings)
+    labels = np.concatenate(_labels)
+    probs = np.concatenate(_probs)
+    
+    df = pd.DataFrame({"protein_id": protein_ids, "curvenet_embeddings": embeddings, "goa_parent_labels": labels, "pred_prob": probs})
+    df.to_parquet(f"../checkpoints/{args.exp_name}/curvenet_embedding.parquet")
     
 
 
