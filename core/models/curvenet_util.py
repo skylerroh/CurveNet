@@ -178,10 +178,10 @@ class Attention_block(nn.Module):
 
 
 class LPFA(nn.Module):
-    def __init__(self, in_channel, out_channel, k, mlp_num=2, initial=False):
+    def __init__(self, in_channel, out_channel, k, mlp_num=2, initial=False, device=torch.device('cuda')):
         super(LPFA, self).__init__()
         self.k = k
-        self.device = torch.device('cuda')
+        self.device = torch.device("cpu")
         self.initial = initial
 
         if not initial:
@@ -306,7 +306,7 @@ class PointNetFeaturePropagation(nn.Module):
 
 
 class CIC(nn.Module):
-    def __init__(self, npoint, radius, k, in_channels, output_channels, bottleneck_ratio=2, mlp_num=2, curve_config=None):
+    def __init__(self, npoint, radius, k, in_channels, output_channels, bottleneck_ratio=2, mlp_num=2, curve_config=None, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
         super(CIC, self).__init__()
         self.in_channels = in_channels
         self.output_channels = output_channels
@@ -314,6 +314,7 @@ class CIC(nn.Module):
         self.radius = radius
         self.k = k
         self.npoint = npoint
+        self.device = device
 
         planes = in_channels // bottleneck_ratio
 
@@ -346,7 +347,7 @@ class CIC(nn.Module):
 
         self.maxpool = MaskedMaxPool(npoint, radius, k)
 
-        self.lpfa = LPFA(planes, planes, k, mlp_num=mlp_num, initial=False)
+        self.lpfa = LPFA(planes, planes, k, mlp_num=mlp_num, initial=False, device=device)
 
     def forward(self, xyz, x):
  

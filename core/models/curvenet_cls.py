@@ -16,14 +16,14 @@ curve_config = {
     }
 
 class CurveNet(nn.Module):
-    def __init__(self, num_classes=40, k=20, num_input_to_curvenet=1024, setting='default'):
+    def __init__(self, num_classes=40, k=20, num_input_to_curvenet=1024, setting='default', device=torch.device('cuda')):
         super(CurveNet, self).__init__()
         self.num_input_to_curvenet = num_input_to_curvenet
 
         assert setting in curve_config
 
         additional_channel = 32
-        self.lpfa = LPFA(9, additional_channel, k=k, mlp_num=1, initial=True)
+        self.lpfa = LPFA(9, additional_channel, k=k, mlp_num=1, initial=True, device=device)
 
         # encoder
         self.cic11 = CIC(npoint=self.num_input_to_curvenet, radius=0.2, k=k, in_channels=additional_channel, output_channels=64, bottleneck_ratio=2, mlp_num=1, curve_config=curve_config[setting][0])

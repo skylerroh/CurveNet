@@ -196,7 +196,7 @@ def train_all(args, io):
     icvec = np.ones((num_classes,))#np.load(args.icvec_file).astype(np.float32)
     assert icvec.size == num_classes
     
-    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
+    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, device=device).to(device)
     model = nn.DataParallel(model)
 
     if args.use_sgd:
@@ -262,11 +262,11 @@ def embed(args, io):
                               batch_size=args.batch_size, shuffle=True, drop_last=True)
 
     device = torch.device("cuda" if args.cuda else "cpu")
-
+    num_classes = all_loader.dataset.num_label_categories
     #Try to load models
-    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
+    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, device=device).to(device)
     model = nn.DataParallel(model)
-    model.load_state_dict(torch.load(args.model_path))
+    model.load_state_dict(torch.load(args.model_path, map_location=device))
 
     model = model.eval()
     count = 0.0
@@ -275,10 +275,10 @@ def embed(args, io):
     _probs = []
     _labels = []
     for protein_id, data, label in all_loader:
-        data, label = data.to(device), label.to(device).squeeze()
+        data, label = data.float().to(device), label.to(device).squeeze()
         data = data.permute(0, 2, 1)
         batch_size = data.size()[0]
-        logits, emb = model(data)
+        logits, embs = model(data)
         probs = torch.sigmoid(logits)
         
         _protein_ids.append(protein_id)
@@ -320,10 +320,12 @@ if __name__ == "__main__":
     parser.add_argument('--scheduler', type=str, default='cos', metavar='N',
                         choices=['cos', 'step'],
                         help='Scheduler to use, [cos, step]')
-    parser.add_argument('--no_cuda', type=bool, default=False,
+    parser.add_argument('--no_cuda', action="store_true", default=False,
                         help='enables CUDA training')
-    parser.add_argument('--eval', type=bool,  default=False,
+    parser.add_argument('--eval', action="store_true", default=False,
                         help='evaluate the model')
+    parser.add_argument('--embed', action="store_true", default=False,
+                        help='embed from trained model')
     parser.add_argument('--num_points', type=int, default=2048,
                         help='num of points to use')
     parser.add_argument('--model_path', type=str, default='', metavar='N',
@@ -336,6 +338,8 @@ if __name__ == "__main__":
 
     if args.eval:
         io = IOStream('../checkpoints/' + args.exp_name + '/eval.log')
+    elif args.embed:
+        io = IOStream('../checkpoints/' + args.exp_name + '/embed.log')
     else:
         io = IOStream('../checkpoints/' + args.exp_name + '/run.log')
     io.cprint(str(args))
@@ -349,8 +353,12 @@ if __name__ == "__main__":
     else:
         io.cprint('Using CPU')
 
-    if not args.eval:
-        train(args, io)
-    else:
+    if args.eval:
         with torch.no_grad():
             test(args, io)
+    elif args.embed:
+        with torch.no_grad():
+            embed(args, io)
+    else:
+        train(args, io)
+        
