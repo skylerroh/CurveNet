@@ -295,6 +295,8 @@ class ProteinsExtendedWithMask(Dataset):
         self.partition = partition
         self.max_points = 4000
         self.id, self.data, self.label = self.load_data_cls(partition)
+        self.augment_data = self.partition in ('train', 'all_with_labels')
+        print(f"partition `{partition}`, augment_data with rotation when get item called: {self.augment_data}")
         
     def load_data_cls(self, partition, overwrite=False):
         if not os.path.exists(DATA_DIR):
@@ -311,11 +313,8 @@ class ProteinsExtendedWithMask(Dataset):
         _id = self.id[item]
         pointcloud = self.data[item]
         label = self.label[item]
-        if self.partition in ('train', 'all_with_labels'):
+        if self.augment_data:
             pointcloud = rotate_pointcloud(pointcloud)
-            # pointcloud = translate_pointcloud(pointcloud)
-            # pointcloud = jitter_pointcloud(pointcloud)
-            # np.random.shuffle(pointcloud)
         return _id, pointcloud, label
 
     def __len__(self):

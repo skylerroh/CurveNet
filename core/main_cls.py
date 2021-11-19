@@ -330,6 +330,8 @@ if __name__ == "__main__":
                         help='evaluate the model')
     parser.add_argument('--embed', action="store_true", default=False,
                         help='embed from trained model')
+    parser.add_argument('--train_all', action="store_true", default=False,
+                        help='embed from trained model')
     parser.add_argument('--num_points', type=int, default=2048,
                         help='num of points to use')
     parser.add_argument('--model_path', type=str, default='', metavar='N',
@@ -363,6 +365,8 @@ if __name__ == "__main__":
     elif args.embed:
         with torch.no_grad():
             embed(args, io)
+    elif args.train_all:
+        train_all(args, io)
     else:
         train(args, io)
         
