@@ -196,8 +196,9 @@ def train_all(args, io):
     # create model
     num_classes = train_loader.dataset.num_label_categories
     
-    icvec = np.ones((num_classes,))#np.load(args.icvec_file).astype(np.float32)
-    assert icvec.size == num_classes
+    icvec_np = get_ic_vec(load_labels()).to_numpy()
+    assert icvec_np.size == num_classes
+    icvec = torch.from_numpy(icvec_np).to(device)
     
     model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, device=device).to(device)
     model = nn.DataParallel(model)
@@ -214,7 +215,7 @@ def train_all(args, io):
     elif args.scheduler == 'step':
         scheduler = MultiStepLR(opt, [120, 160], gamma=0.1)
     
-    criterion = cal_loss
+    criterion = lambda x, y: cal_loss(x, y, smoothing=False, weight=icvec)
 
     for epoch in range(args.epochs):
         ####################
@@ -252,10 +253,10 @@ def train_all(args, io):
         train_true = np.concatenate(train_true)
         train_prob = np.concatenate(train_prob)
         
-        train_eval_metrics = evaluate(train_true, train_prob, icvec, nth=10)
+        train_eval_metrics = evaluate(train_true, train_prob, icvec_np, nth=10)
         outstr = 'Train %d, loss: %.6f, ' % (epoch, train_loss*1.0/count) + "train metrics: {}".format({k: "%.6f" % v for k, v in train_eval_metrics.items()})
         io.cprint(outstr)
-        if epoch+1 % 25 == 0:
+        if (epoch+1) % 25 == 0:
             torch.save(model.state_dict(), f'../checkpoints/{args.exp_name}/models/model_{epoch+1}.t7')
     
     
@@ -346,6 +347,8 @@ if __name__ == "__main__":
         io = IOStream('../checkpoints/' + args.exp_name + '/eval.log')
     elif args.embed:
         io = IOStream('../checkpoints/' + args.exp_name + '/embed.log')
+    elif args.train_all:
+        io = IOStream('../checkpoints/' + args.exp_name + '/train_all.log')
     else:
         io = IOStream('../checkpoints/' + args.exp_name + '/run.log')
     io.cprint(str(args))
