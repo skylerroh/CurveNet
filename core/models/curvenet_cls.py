@@ -39,10 +39,10 @@ class CurveNet(nn.Module):
         self.cic42 = CIC(npoint=64, radius=1, k=k, in_channels=512, output_channels=512, bottleneck_ratio=4, mlp_num=1, curve_config=curve_config[setting][3])
 
         self.conv0 = nn.Sequential(
-            nn.Conv1d(512, 512, kernel_size=1, bias=False),
-            nn.BatchNorm1d(512),
+            nn.Conv1d(512, 256, kernel_size=1, bias=False),
+            nn.BatchNorm1d(256),
             nn.ReLU(inplace=True))
-        self.conv01 = nn.Linear(512 * 2, 512 * 2, bias=True)
+        self.conv01 = nn.Linear(1024 + 512, 512 * 2, bias=True)
         self.conv1 = nn.Linear(512 * 2, 512 * 2, bias=False)
         self.conv2 = nn.Linear(512 * 2, num_classes)
         self.bn01 = nn.BatchNorm1d(1024)
@@ -55,7 +55,7 @@ class CurveNet(nn.Module):
         indices = torch.argsort(torch.rand(*x.shape), dim=-1)
         return xyz[torch.arange(xyz.shape[0]).unsqueeze(-1), indices]
 
-    def forward(self, xyz):
+    def forward(self, xyz, seqvec):
         # shuffled = torch.swapaxes(self.shuffle(torch.swapaxes(xyz, 1, 2)), 1, 2)
         l0_points = self.lpfa(xyz, xyz)
 
@@ -74,7 +74,7 @@ class CurveNet(nn.Module):
         x = self.conv0(l4_points)
         x_max = F.adaptive_max_pool1d(x, 1)
         x_avg = F.adaptive_avg_pool1d(x, 1)
-        x = torch.cat((x_max, x_avg), dim=1).squeeze(-1)
+        x = torch.cat((torch.cat((x_max, x_avg), dim=1).squeeze(-1), seqvec), dim=1)
         
         x = F.relu(self.bn01(self.conv01(x).unsqueeze(-1)), inplace=True).squeeze(-1)
         x = self.dp01(x)

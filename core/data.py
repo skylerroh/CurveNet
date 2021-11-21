@@ -19,6 +19,8 @@ import numpy as np
 import os
 import sys
 import torch
+import pandas as pd
+import pickle5 as pickle
 from dataclasses import dataclass
 from torch.utils.data import Dataset
 
@@ -323,7 +325,7 @@ class ProteinsExtendedWithMask(Dataset):
         self.num_points = num_points
         self.partition = partition
         self.max_points = 4000
-        self.id, self.data, self.label = self.load_data_cls(partition)
+        self.id, self.data, self.seqvec, self.label = self.load_data_cls(partition)
         self.augment_data = self.partition in ('train', 'all_with_labels')
         print(f"partition `{partition}`, augment_data with rotation when get item called: {self.augment_data}")
         
@@ -332,19 +334,26 @@ class ProteinsExtendedWithMask(Dataset):
             raise Exception("first download structure_files into project root")
         create_protein_point_clouds(name=self.name, num_points=self.max_points, overwrite=overwrite)
         all_id, all_data, all_label = read_point_clouds_w_labels_as_hd5f(name=self.name, partition=partition)
+        
+        # add seqvec to data 
+        with open(f"{DATA_DIR}/seqvec_vectors.pkl", "rb") as fh:
+            seqvec = pickle.load(fh)[["protein_id", "seqvec"]].set_index("protein_id").seqvec.to_dict()
+            all_seqvec = [seqvec[p.decode("utf-8")] for p in all_id]
+        
         print(all_id.shape)
         print(all_data.shape)
         print(all_label.shape)
-        return all_id, all_data, all_label
+        return all_id, all_data, all_seqvec, all_label
 
 
     def __getitem__(self, item):
         _id = self.id[item]
+        seqvec = self.seqvec[item]
         pointcloud = self.data[item]
         label = self.label[item]
         if self.augment_data:
             pointcloud = rotate_pointcloud(pointcloud)
-        return _id, pointcloud, label
+        return _id, pointcloud, seqvec, label
 
     def __len__(self):
         return self.data.shape[0]

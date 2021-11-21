@@ -37,7 +37,7 @@ def _init_():
     torch.set_printoptions(10)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ['PYTHONHASHSEED'] = str(6279)
 
     # prepare file structures
     if not os.path.exists('../checkpoints'):
@@ -96,12 +96,12 @@ def train(args, io):
         model.train()
         train_prob = []
         train_true = []
-        for _id, data, multihot_label in train_loader:
-            data, multihot_label = data.to(device, dtype=torch.float), multihot_label.to(device)
+        for _id, data, seqvec, multihot_label in train_loader:
+            data, seqvec, multihot_label = data.to(device, dtype=torch.float), seqvec.to(device, dtype=torch.float), multihot_label.to(device)
             data = data.permute(0, 2, 1)
             batch_size = data.size()[0]
             opt.zero_grad()
-            logits = model(data)[0]
+            logits = model(data, seqvec)[0]
             probs = torch.sigmoid(logits)
             loss = criterion(logits, multihot_label)
             loss.backward()
@@ -136,11 +136,11 @@ def train(args, io):
         test_prob = []
         test_true = []
         with torch.no_grad():   # set all 'requires_grad' to False
-            for _id, data, multihot_label in test_loader:
-                data, multihot_label = data.to(device, dtype=torch.float), multihot_label.to(device)
+            for _id, data, seqvec, multihot_label in test_loader:
+                data, multihot_label = data.to(device, dtype=torch.float), seqvec.to(device, dtype=torch.float), multihot_label.to(device)
                 data = data.permute(0, 2, 1)
                 batch_size = data.size()[0]
-                logits = model(data)[0]
+                logits = model(data, seqvec)[0]
                 probs = torch.sigmoid(logits)
                 loss = criterion(logits, multihot_label)
                 count += batch_size
