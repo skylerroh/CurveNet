@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
-from data import ProteinsSampled, ProteinsExtended, ProteinsExtendedWithMask, get_ic_vec, load_labels
+from data import ProteinsSampled, ProteinsExtended, ProteinsExtendedWithMask, load_labels
 from models.curvenet_cls import CurveNet, CurveNetWithLSTMHead
 import numpy as np
 from torch.utils.data import DataLoader
@@ -67,7 +67,7 @@ def train(args, io):
     icvec_np = labelsData.ic_vec
     assert icvec_np.size == num_classes
     icvec = torch.from_numpy(icvec_np).to(device)
-    pos_weights = torch.from_numpy(labelsData.pos_weights)
+    pos_weights = torch.from_numpy(labelsData.pos_weights).to(device)
     
     model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
     model = nn.DataParallel(model)
@@ -84,7 +84,7 @@ def train(args, io):
     elif args.scheduler == 'step':
         scheduler = MultiStepLR(opt, [120, 160], gamma=0.1)
     
-    criterion = lambda x, y: cal_loss(x, y, smoothing=False, weight=icvec, pos_weights=pos_weights)
+    criterion = lambda x, y: cal_loss(x, y, smoothing=0.0, label_weights=icvec, pos_weights=pos_weights)
 
     best_test_fmax = 0
     for epoch in range(args.epochs):
@@ -206,7 +206,7 @@ def train_all(args, io):
     icvec_np = labelsData.ic_vec
     assert icvec_np.size == num_classes
     icvec = torch.from_numpy(icvec_np).to(device)
-    pos_weights = torch.from_numpy(labelsData.pos_weights)
+    pos_weights = torch.from_numpy(labelsData.pos_weights).to(device)
     
     model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, device=device).to(device)
     model = nn.DataParallel(model)
@@ -223,7 +223,7 @@ def train_all(args, io):
     elif args.scheduler == 'step':
         scheduler = MultiStepLR(opt, [120, 160], gamma=0.1)
     
-    criterion = lambda x, y: cal_loss(x, y, smoothing=False, weight=icvec, pos_weights=pos_weights)
+    criterion = lambda x, y: cal_loss(x, y, smoothing=0.0, label_weights=icvec, pos_weights=pos_weights)
 
     for epoch in range(args.epochs):
         ####################

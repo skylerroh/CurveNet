@@ -15,19 +15,20 @@ from evaluation import *
 # import torch.nn.BCEWithLogitsLoss
 
 
-def cal_loss(pred, gold, smoothing=True, label_weights=None, pos_weights=None):
+def cal_loss(pred, gold, smoothing=0.0, label_weights=None, pos_weights=None):
     ''' Calculate cross entropy loss, apply label smoothing if needed. '''
 
     # gold = gold.contiguous().view(-1)
-    if weight is not None:
-        weight = weight / weight.mean()
+    if label_weights is not None:
+        label_weights = label_weights / label_weights.mean()
 
-    if smoothing:
-        eps = 0.1
+    if smoothing is not None:
+        # print(f"smoothing_eps: {smoothing}")
+        eps = smoothing
         
-        one_hot = gold
+        multi_hot = gold
         n_class = pred.size(1)
-        n_lab = torch.sum(one_hot,dim=1)
+        n_lab = torch.sum(multi_hot,dim=1)
 
         # one_hot = torch.zeros_like(pred).scatter(1, gold.view(-1, 1), 1)
         # one_hot = (one_hot * (1 - eps/(n_lab[:, None]))) + \
@@ -35,12 +36,12 @@ def cal_loss(pred, gold, smoothing=True, label_weights=None, pos_weights=None):
         if pos_weights is None:
             pos_weights = torch.tensor(np.ones(n_class))
         
-        loss = -(target * F.logsigmoid(input) * pos_weights + (1 - target) * F.logsigmoid(-input))
+        loss = -(multi_hot * F.logsigmoid(pred) * pos_weights + (1 - multi_hot) * F.logsigmoid(-pred))
         
         if label_weights is None:
             label_weights = torch.tensor(np.ones(n_class))
 
-        loss = (loss*label_weights).sum(dim=1).mean()
+        loss = (loss*label_weights).mean(dim=1).mean()
     else:
         loss = F.multilabel_soft_margin_loss(pred, gold, weight=label_weights)
 

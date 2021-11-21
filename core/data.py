@@ -194,7 +194,7 @@ def load_labels():
     min_proteins_for_label = 20
     
     functions = pd.read_parquet(f"{DATA_DIR}/protein_goa_mf_parent_only_lessthan500.parquet")
-    functions = functions[~pd.isna(funcs.IC_t) & (funcs.num_proteins_per_parent_mf > 20)]
+    functions = functions[~pd.isna(functions.IC_t) & (functions.num_proteins_per_parent_mf > 20)]
     unique_functions = sorted(functions.parent_mf.dropna().unique())
     print("num unique function labels: ", len(unique_functions))
 
@@ -205,14 +205,14 @@ def load_labels():
     protein_to_function_labels = functions.groupby("protein_id").function_idx.agg(lambda x: sorted(list(set(x.dropna()))))
     protein_to_labels_dict = protein_to_function_labels.to_dict()
     
-    ic_vec = functions[["parent_mf", "IC_t"]].drop_duplicates().set_index("parent_mf").IC_t.sort_index()
+    ic_vec = functions[["parent_mf", "IC_t"]].drop_duplicates().set_index("parent_mf").IC_t.sort_index().to_numpy()
     pos_weight = get_pos_weight(protein_to_labels_dict)
     
     return Labels(
         protein_to_labels = protein_to_labels_dict,
         num_unique = len(unique_functions),
         ic_vec = ic_vec,
-        pos_weight = pos_weight
+        pos_weights = pos_weight
     )
         
         
@@ -228,7 +228,7 @@ def get_pos_weight(labels_dict):
     N = len(labels_dict)
     m = pd.Series(list(itertools.chain(*list(labels_dict.values())))).value_counts().sort_index()
     pos_weight = (N-m) / m
-    return np.sqrt(pos_weight)
+    return np.sqrt(pos_weight).to_numpy()
 
 
 def translate_pointcloud(pointcloud):
@@ -318,6 +318,7 @@ class ProteinsExtended(Dataset):
         
 class ProteinsExtendedWithMask(Dataset):
     def __init__(self, num_points, partition='train'):
+        self.name = "confidence_mask_new_child_labels"
         self.num_label_categories = 312
         self.num_points = num_points
         self.partition = partition
@@ -325,8 +326,6 @@ class ProteinsExtendedWithMask(Dataset):
         self.id, self.data, self.label = self.load_data_cls(partition)
         self.augment_data = self.partition in ('train', 'all_with_labels')
         print(f"partition `{partition}`, augment_data with rotation when get item called: {self.augment_data}")
-        
-        self.name = "confidence_mask_new_child_labels
         
     def load_data_cls(self, partition, overwrite=False):
         if not os.path.exists(DATA_DIR):
@@ -355,4 +354,5 @@ point_cloud_method_by_name = {
     "sampled": protein_to_sampled_point_cloud,
     "sequence_head": protein_to_sampled_point_cloud,
     "confidence_mask_new_labels": protein_to_masked_point_cloud,
+    "confidence_mask_new_child_labels": protein_to_masked_point_cloud
 }
