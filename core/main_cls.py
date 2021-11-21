@@ -49,6 +49,7 @@ def _init_():
     os.system('cp main_cls.py ../checkpoints/'+args.exp_name+'/main_cls.py.backup')
     os.system('cp models/curvenet_cls.py ../checkpoints/'+args.exp_name+'/curvenet_cls.py.backup')
 
+    
 def train(args, io):
     train_loader = DataLoader(ProteinsExtendedWithMask(partition='train', num_points=args.num_points), num_workers=8,
                               batch_size=args.batch_size, shuffle=True, drop_last=True)
@@ -59,11 +60,14 @@ def train(args, io):
     io.cprint("Let's use" + str(torch.cuda.device_count()) + "GPUs!")
 
     # create model
-    num_classes = train_loader.dataset.num_label_categories
+    labelsData = load_labels()
     
-    icvec_np = get_ic_vec(load_labels()).to_numpy()
+    num_classes = labelsData.num_unique
+    
+    icvec_np = labelsData.ic_vec
     assert icvec_np.size == num_classes
     icvec = torch.from_numpy(icvec_np).to(device)
+    pos_weights = torch.from_numpy(labelsData.pos_weights)
     
     model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
     model = nn.DataParallel(model)
@@ -80,7 +84,7 @@ def train(args, io):
     elif args.scheduler == 'step':
         scheduler = MultiStepLR(opt, [120, 160], gamma=0.1)
     
-    criterion = lambda x, y: cal_loss(x, y, smoothing=False, weight=icvec)
+    criterion = lambda x, y: cal_loss(x, y, smoothing=False, weight=icvec, pos_weights=pos_weights)
 
     best_test_fmax = 0
     for epoch in range(args.epochs):
@@ -155,6 +159,7 @@ def train(args, io):
             torch.save(model.state_dict(), '../checkpoints/%s/models/model.t7' % args.exp_name)
         io.cprint('best: %.3f' % best_test_fmax)
 
+        
 def test(args, io):
     test_loader = DataLoader(Proteins(partition='test', num_points=args.num_points),
                              batch_size=args.test_batch_size, shuffle=False, drop_last=False)
@@ -194,11 +199,14 @@ def train_all(args, io):
     io.cprint("Let's use" + str(torch.cuda.device_count()) + "GPUs!")
 
     # create model
-    num_classes = train_loader.dataset.num_label_categories
+    labelsData = load_labels()
     
-    icvec_np = get_ic_vec(load_labels()).to_numpy()
+    num_classes = labelsData.num_unique
+    
+    icvec_np = labelsData.ic_vec
     assert icvec_np.size == num_classes
     icvec = torch.from_numpy(icvec_np).to(device)
+    pos_weights = torch.from_numpy(labelsData.pos_weights)
     
     model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, device=device).to(device)
     model = nn.DataParallel(model)
@@ -215,7 +223,7 @@ def train_all(args, io):
     elif args.scheduler == 'step':
         scheduler = MultiStepLR(opt, [120, 160], gamma=0.1)
     
-    criterion = lambda x, y: cal_loss(x, y, smoothing=False, weight=icvec)
+    criterion = lambda x, y: cal_loss(x, y, smoothing=False, weight=icvec, pos_weights=pos_weights)
 
     for epoch in range(args.epochs):
         ####################

@@ -146,8 +146,8 @@ def create_protein_point_clouds(name, num_points=2048, overwrite=False):
     if dir_exists and overwrite:
         os.rmdir(POINT_CLOUD_DIR)
     if not dir_exists:
-        label_lookup_dict = load_labels()
-        n_categories = int(max([max(k) for k in label_lookup_dict.values() if len(k) > 0]) + 1)
+        labels = load_labels()
+        n_categories = labels.num_unique # int(max([max(k) for k in label_lookup_dict.values() if len(k) > 0]) + 1)
 
         all_point_clouds = []
 
@@ -164,7 +164,7 @@ def create_protein_point_clouds(name, num_points=2048, overwrite=False):
                 else:
                     all_point_clouds.append(ProteinPointCloud(id, group, group.shape[0]))
 
-        all_point_clouds = [p.get_w_label(label_lookup_dict, n_categories) for p in all_point_clouds]
+        all_point_clouds = [p.get_w_label(labels.protein_to_labels, n_categories) for p in all_point_clouds]
         all_point_clouds_w_labels = [p for p in all_point_clouds if p.labels.sum() > 0]
         train_point_clouds, test_point_clouds = train_test_split(all_point_clouds_w_labels)
         
@@ -179,12 +179,22 @@ def create_protein_point_clouds(name, num_points=2048, overwrite=False):
         store_point_clouds_w_labels_as_hd5f(name, all_point_clouds_w_labels, "all_with_labels", num_points, n_categories)
         print("Done created point clouds")
 
+
+@dataclass
+class Labels:
+    protein_to_labels: dict
+    num_unique: int
+    ic_vec: np.ndarray
+    pos_weights: np.ndarray
+
         
 def load_labels():
     def get_index_of_function_label(function, function_arr):
         return function_arr.get(function)
-
-    functions = pd.read_parquet(f"{DATA_DIR}/protein_goa_mf_parent_only.parquet")
+    min_proteins_for_label = 20
+    
+    functions = pd.read_parquet(f"{DATA_DIR}/protein_goa_mf_parent_only_lessthan500.parquet")
+    functions = functions[~pd.isna(funcs.IC_t) & (funcs.num_proteins_per_parent_mf > 20)]
     unique_functions = sorted(functions.parent_mf.dropna().unique())
     print("num unique function labels: ", len(unique_functions))
 
@@ -193,14 +203,32 @@ def load_labels():
         lambda x: get_index_of_function_label(x, functions_to_index)
     )
     protein_to_function_labels = functions.groupby("protein_id").function_idx.agg(lambda x: sorted(list(set(x.dropna()))))
-    return protein_to_function_labels.to_dict()
+    protein_to_labels_dict = protein_to_function_labels.to_dict()
+    
+    ic_vec = functions[["parent_mf", "IC_t"]].drop_duplicates().set_index("parent_mf").IC_t.sort_index()
+    pos_weight = get_pos_weight(protein_to_labels_dict)
+    
+    return Labels(
+        protein_to_labels = protein_to_labels_dict,
+        num_unique = len(unique_functions),
+        ic_vec = ic_vec,
+        pos_weight = pos_weight
+    )
+        
+        
 
 
-def get_ic_vec(labels_dict):
+# def get_ic_vec(labels_dict):
+#     N = len(labels_dict)
+#     m = pd.Series(list(itertools.chain(*list(labels_dict.values())))).value_counts()
+#     ic = -np.log(m.sort_index()/N)
+#     return ic
+
+def get_pos_weight(labels_dict):
     N = len(labels_dict)
-    m = pd.Series(list(itertools.chain(*list(labels_dict.values())))).value_counts()
-    ic = -np.log(m.sort_index()/N)
-    return ic
+    m = pd.Series(list(itertools.chain(*list(labels_dict.values())))).value_counts().sort_index()
+    pos_weight = (N-m) / m
+    return np.sqrt(pos_weight)
 
 
 def translate_pointcloud(pointcloud):
@@ -290,7 +318,7 @@ class ProteinsExtended(Dataset):
         
 class ProteinsExtendedWithMask(Dataset):
     def __init__(self, num_points, partition='train'):
-        self.num_label_categories = 19
+        self.num_label_categories = 312
         self.num_points = num_points
         self.partition = partition
         self.max_points = 4000
@@ -298,11 +326,13 @@ class ProteinsExtendedWithMask(Dataset):
         self.augment_data = self.partition in ('train', 'all_with_labels')
         print(f"partition `{partition}`, augment_data with rotation when get item called: {self.augment_data}")
         
+        self.name = "confidence_mask_new_child_labels
+        
     def load_data_cls(self, partition, overwrite=False):
         if not os.path.exists(DATA_DIR):
             raise Exception("first download structure_files into project root")
-        create_protein_point_clouds(name="confidence_mask_new_labels", num_points=self.max_points, overwrite=overwrite)
-        all_id, all_data, all_label = read_point_clouds_w_labels_as_hd5f(name="confidence_mask_new_labels", partition=partition)
+        create_protein_point_clouds(name=self.name, num_points=self.max_points, overwrite=overwrite)
+        all_id, all_data, all_label = read_point_clouds_w_labels_as_hd5f(name=self.name, partition=partition)
         print(all_id.shape)
         print(all_data.shape)
         print(all_label.shape)
