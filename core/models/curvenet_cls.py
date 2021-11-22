@@ -9,7 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .curvenet_util import *
 
-
 curve_config = {
         'default': [[50, 10], [50, 10], None, None],
         'long':  [[10, 30], None,  None,  None]
@@ -84,26 +83,65 @@ class CurveNet(nn.Module):
         x = self.conv2(x)
         return x, latent_feat
     
-class CurveNetWithLSTMHead(CurveNet):
-    def __init__(self, num_classes=40, k=20, num_input_to_curvenet=1024, setting='default'):
-        super(CurveNetWithLSTMHead, self).__init__(num_classes, k, num_input_to_curvenet, setting)
-        self.lstm_head = nn.LSTM(input_size=3, hidden_size=1, num_layers=1, bidirectional=True)
-        self.linear1 = nn.Linear(2048, num_input_to_curvenet)
+class LSTMWithMetadata(nn.Module):
+    def __init__(self, num_classes=40, k=20, num_input_to_curvenet=1024):
+        # super(CurveNetWithLSTMHead, self).__init__(num_classes, k, num_input_to_curvenet, setting)
+        super(LSTMWithMetadata, self).__init__()
         
-    def choose_n_points(self, xyz):
-        # (batch, 3, n_points) -> (batch, n_points, 3)
-        xyz = torch.swapaxes(xyz, 1, 2)
-        lstm_out, lstm_grad = self.lstm_head(xyz)
-        # flatten bidirectional output to two features per point
-        # input one hidden layer to extract single value per point
-        out = self.linear1(torch.flatten(lstm_out, start_dim=1))
+        factory_kwargs = {'dtype': torch.float}
+        self.num_shapes = 9
+        self.num_aminos = 21
+        self.input_size = 3 + self.num_shapes + self.num_aminos
+        self.num_lstm_layers = 3
+        self.lstm_hidden = 10
         
-        # gather top values to move on to curvenet
-        topk_val, topk_ind = torch.topk(out, self.num_input_to_curvenet, dim=1)
-        topk_points = torch.gather(xyz, 1, topk_ind.unsqueeze(-1).repeat(1, 1, 3))
-        shuffled = self.shuffle(topk_points)
-        return torch.swapaxes(shuffled, 1, 2)
+        self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=self.lstm_hidden, num_layers=self.num_lstm_layers, bidirectional=True, batch_first=True)
+        
+        self.projection_size = 3
+        # self.project = nn.Parameter(torch.empty((self.lstm_hidden, self.projection_size), **factory_kwargs), requires_grad=True).to(device=device)
+        # nn.init.xavier_uniform_(self.project)
+        self.project = nn.Parameter(torch.empty((self.lstm_hidden*2, self.projection_size), **factory_kwargs), requires_grad=True) 
+        
+        self.fcn1 = nn.Sequential(
+            nn.Linear(num_input_to_curvenet * self.projection_size, 256, bias=False),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.5),)
+        self.fcn2 = nn.Sequential(
+            nn.Linear(256 + 1024, 1024, bias=False),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(1024),
+            nn.Dropout(0.5),)
+        self.fcn3 = nn.Sequential(
+            nn.Linear(1024, 512, bias=False),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.5),)
+        self.fcn4 = nn.Linear(512, num_classes)
+        
+#     def choose_n_points(self, xyz):
+#         # (batch, 3, n_points) -> (batch, n_points, 3)
+#         xyz = torch.swapaxes(xyz, 1, 2)
+#         lstm_out, lstm_grad = self.lstm_head(xyz)
+#         # flatten bidirectional output to two features per point
+#         # input one hidden layer to extract single value per point
+#         out = self.linear1(torch.flatten(lstm_out, start_dim=1))
+        
+#         # gather top values to move on to curvenet
+#         topk_val, topk_ind = torch.topk(out, self.num_input_to_curvenet, dim=1)
+#         topk_points = torch.gather(xyz, 1, topk_ind.unsqueeze(-1).repeat(1, 1, 3))
+#         shuffled = self.shuffle(topk_points)
+#         return torch.swapaxes(shuffled, 1, 2)
     
-    def forward(self, xyz):
-        xyz = self.choose_n_points(xyz)
-        return super(CurveNetWithLSTMHead, self).forward(xyz)
+    def forward(self, xyz, shapes, amino_acids, seqvec):
+        # (batch, 3, n_points) -> (batch, n_points, 3)
+        x = torch.cat((xyz, shapes, amino_acids), dim=2) # (Batch, SeqLen, self.input_size)
+        x, _ = self.lstm(x) # (Batch, SeqLen, self.lstm_hidden*2)
+        x = torch.matmul(x, self.project) # (Batch, SeqLen, proj_size)
+        x = torch.flatten(x, start_dim=1) # (Batch, SeqLen * proj_size)
+        x = self.fcn1(x)
+        x = torch.cat((x, seqvec), dim=1).squeeze(-1)
+        latent_feat = self.fcn2(x)
+        x = self.fcn3(latent_feat)
+        x = self.fcn4(x)
+        return x, None

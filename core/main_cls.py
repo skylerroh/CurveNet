@@ -21,11 +21,12 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
 from data import ProteinsSampled, ProteinsExtended, ProteinsExtendedWithMask, load_labels
-from models.curvenet_cls import CurveNet, CurveNetWithLSTMHead
+from models.curvenet_cls import CurveNet, LSTMWithMetadata
 import numpy as np
 from torch.utils.data import DataLoader
 from util import cal_loss, IOStream, evaluate
 import sklearn.metrics as metrics
+from torchsummary import summary
 
 
 def _init_():
@@ -60,6 +61,7 @@ def train(args, io):
     io.cprint("Let's use" + str(torch.cuda.device_count()) + "GPUs!")
 
     # create model
+
     labelsData = load_labels()
     
     num_classes = labelsData.num_unique
@@ -69,8 +71,9 @@ def train(args, io):
     icvec = torch.from_numpy(icvec_np).to(device)
     pos_weights = torch.from_numpy(labelsData.pos_weights).to(device)
     
-    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
+    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
     model = nn.DataParallel(model)
+    # print(summary(model, [(32, 4000,3), (32,4000,9), (32, 4000,21), (32, 4000, 1024)]))
 
     if args.use_sgd:
         io.cprint("Use SGD")
@@ -86,7 +89,8 @@ def train(args, io):
     
     criterion = lambda x, y: cal_loss(x, y, smoothing=0.0, label_weights=icvec, pos_weights=pos_weights)
 
-    best_test_fmax = 0
+    best_test_loss = 0
+    best_metrics = None
     for epoch in range(args.epochs):
         ####################
         # Train
@@ -96,12 +100,18 @@ def train(args, io):
         model.train()
         train_prob = []
         train_true = []
-        for _id, data, seqvec, multihot_label in train_loader:
-            data, seqvec, multihot_label = data.to(device, dtype=torch.float), seqvec.to(device, dtype=torch.float), multihot_label.to(device)
-            data = data.permute(0, 2, 1)
+        for _id, data, shapes, amino_acids, seqvec, multihot_label in train_loader:
+            data, shapes, amino_acids, seqvec, multihot_label = (
+                data.to(device, dtype=torch.float), 
+                F.one_hot(shapes.to(device, dtype=torch.long), 9), 
+                F.one_hot(amino_acids.to(device, dtype=torch.long), 21), 
+                seqvec.to(device, dtype=torch.float), 
+                multihot_label.to(device)
+            )
+            # data = data.permute(0, 2, 1)
             batch_size = data.size()[0]
             opt.zero_grad()
-            logits = model(data, seqvec)[0]
+            logits = model(data, shapes, amino_acids, seqvec)[0]
             probs = torch.sigmoid(logits)
             loss = criterion(logits, multihot_label)
             loss.backward()
@@ -136,11 +146,17 @@ def train(args, io):
         test_prob = []
         test_true = []
         with torch.no_grad():   # set all 'requires_grad' to False
-            for _id, data, seqvec, multihot_label in test_loader:
-                data, seqvec, multihot_label = data.to(device, dtype=torch.float), seqvec.to(device, dtype=torch.float), multihot_label.to(device)
-                data = data.permute(0, 2, 1)
+            for _id, data, shapes, amino_acids, seqvec, multihot_label in train_loader:
+                data, shapes, amino_acids, seqvec, multihot_label = (
+                    data.to(device, dtype=torch.float), 
+                    F.one_hot(shapes.to(device, dtype=torch.long), 9), 
+                    F.one_hot(amino_acids.to(device, dtype=torch.long), 21), 
+                    seqvec.to(device, dtype=torch.float), 
+                    multihot_label.to(device)
+                )
+                # data = data.permute(0, 2, 1)
                 batch_size = data.size()[0]
-                logits = model(data, seqvec)[0]
+                logits = model(data, shapes, amino_acids, seqvec)[0]
                 probs = torch.sigmoid(logits)
                 loss = criterion(logits, multihot_label)
                 count += batch_size
@@ -153,11 +169,12 @@ def train(args, io):
         test_eval_metrics = evaluate(test_true, test_prob, icvec_np, nth=10)
         outstr = 'Test %d, loss: %.6f, ' % (epoch, test_loss*1.0/count) + "test metrics: {}".format({k: "%.6f" % v for k, v in test_eval_metrics.items()})
         io.cprint(outstr)
-        test_fmax = test_eval_metrics['avg_fmax']
-        if test_fmax >= best_test_fmax:
-            best_test_fmax = test_fmax
+        if test_loss <= best_test_less:
+            test_metrics["loss"] = test_loss
+            best_test_loss = test_loss
+            best_metrics = test_metrics
             torch.save(model.state_dict(), '../checkpoints/%s/models/model.t7' % args.exp_name)
-        io.cprint('best: %.3f' % best_test_fmax)
+        io.cprint('best: %.3f' % best_test_loss)
 
         
 def test(args, io):
@@ -167,7 +184,7 @@ def test(args, io):
     device = torch.device("cuda" if args.cuda else "cpu")
 
     #Try to load models
-    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
+    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
     model = nn.DataParallel(model)
     model.load_state_dict(torch.load(args.model_path))
 
@@ -208,7 +225,7 @@ def train_all(args, io):
     icvec = torch.from_numpy(icvec_np).to(device)
     pos_weights = torch.from_numpy(labelsData.pos_weights).to(device)
     
-    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, device=device).to(device)
+    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, device=device).to(device)
     model = nn.DataParallel(model)
 
     if args.use_sgd:
@@ -276,7 +293,7 @@ def embed(args, io):
     device = torch.device("cuda" if args.cuda else "cpu")
     num_classes = all_loader.dataset.num_label_categories
     #Try to load models
-    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, device=device).to(device)
+    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, device=device).to(device)
     model = nn.DataParallel(model)
     model.load_state_dict(torch.load(args.model_path, map_location=device))
 
@@ -322,7 +339,7 @@ if __name__ == "__main__":
                         help='Size of batch)')
     parser.add_argument('--test_batch_size', type=int, default=16, metavar='batch_size',
                         help='Size of batch)')
-    parser.add_argument('--epochs', type=int, default=200, metavar='N',
+    parser.add_argument('--epochs', type=int, default=100, metavar='N',
                         help='number of episode to train ')
     parser.add_argument('--use_sgd', type=str2bool, default=True,
                         help='Use SGD')

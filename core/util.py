@@ -17,7 +17,7 @@ from evaluation import *
 
 def cal_loss(pred, gold, smoothing=0.0, label_weights=None, pos_weights=None):
     ''' Calculate cross entropy loss, apply label smoothing if needed. '''
-
+    
     # gold = gold.contiguous().view(-1)
     if label_weights is not None:
         label_weights = label_weights / label_weights.mean()
@@ -27,6 +27,7 @@ def cal_loss(pred, gold, smoothing=0.0, label_weights=None, pos_weights=None):
         eps = smoothing
         
         multi_hot = gold
+        
         n_class = pred.size(1)
         n_lab = torch.sum(multi_hot,dim=1)
 
