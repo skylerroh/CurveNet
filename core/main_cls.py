@@ -110,6 +110,9 @@ def train(args, io):
     
     model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, embedding=False).to(device, dtype=torch.float)
     model = nn.DataParallel(model)
+    if args.model_path:
+        print("warm starting with {args.model_path}")
+        model.load_state_dict(torch.load(args.model_path, map_location=device))
     # print(summary(model, [(32, 4000,3), (32,4000,9), (32, 4000,21), (32, 4000, 1024)]))
 
     if args.use_sgd:
