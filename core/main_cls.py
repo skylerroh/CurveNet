@@ -53,18 +53,35 @@ def _init_():
 
 
 def sort_length_indices(lengths):
-    lengths, sorted_indices = torch.sort(lengths, descending=True)
-    sorted_indices = sorted_indices.to(input.device)
-    return sorted_indices
+    sorted_lengths, sorted_indices = torch.sort(lengths, descending=True)
+    sorted_indices = sorted_indices.to(lengths.device)
+    return sorted_lengths, sorted_indices
 
 
-def reorder_batch_by_length(input):
-    return input.index_select(batch_dim, sorted_indices)
+def reorder_batch_by_length(tensor_input, sorted_indices):
+    return tensor_input.index_select(0, sorted_indices)
 
 
-def to_packed_sequence(input, sorted_indices):
-    return pack_padded_sequence(input.index_select(0, sorted_indices), lengths, batch_first=True, enforce_sorted=True)
+def to_packed_sequence(tensor_input, sorted_lengths, sorted_indices):
+    return pack_padded_sequence(reorder_batch_by_length(tensor_input, sorted_indices), sorted_lengths, batch_first=True, enforce_sorted=True)
     
+def to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label):
+    _shapes = F.one_hot(shapes.long(), 9)
+    _amino_acids = F.one_hot(amino_acids.long(), 21)
+
+    sorted_lengths, length_indices_sorted = sort_length_indices(lengths)
+    sorted_lengths = torch.clip(sorted_lengths, max=args.num_points)
+    _id = np.array(_id)[length_indices_sorted.cpu().numpy()]
+    struct_features = torch.cat((data, _shapes, _amino_acids), dim=2)
+    struct_features = reorder_batch_by_length(struct_features, length_indices_sorted)
+
+    struct_features_packed, seqvec, multihot_label = (
+        struct_features.to(dtype=torch.float), 
+        seqvec.to(device, dtype=torch.float), 
+        multihot_label.to(device)
+    )
+    return _id, struct_features, seqvec, multihot_label
+        
 
 def train(args, io):
     train_loader = DataLoader(ProteinsExtendedWithMask(partition='train', num_points=args.num_points), num_workers=8,
@@ -86,7 +103,7 @@ def train(args, io):
     icvec = torch.from_numpy(icvec_np).to(device)
     pos_weights = torch.from_numpy(labelsData.pos_weights).to(device)
     
-    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
+    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device, dtype=torch.float)
     model = nn.DataParallel(model)
     # print(summary(model, [(32, 4000,3), (32,4000,9), (32, 4000,21), (32, 4000, 1024)]))
 
@@ -109,33 +126,19 @@ def train(args, io):
     for epoch in range(args.epochs):
         ####################
         # Train
-        ####################
+        ########s############
         train_loss = 0.0
         count = 0.0
         model.train()
         train_prob = []
         train_true = []
         for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm(train_loader):
-            
-            data, shapes, amino_acids, seqvec, lengths, multihot_label = (
-                data.to(device, dtype=torch.float), 
-                F.one_hot(shapes.to(device, dtype=torch.long), 9), 
-                F.one_hot(amino_acids.to(device, dtype=torch.long), 21), 
-                seqvec.to(device, dtype=torch.float), 
-                lengths.to(device, dtype=torch.int),
-                multihot_label.to(device)
-            )
-            
-#             length_indices_sorted = sort_length_indices(lengths)
-#             _id = reorder_batch_by_length(_id, length_indices_sorted)
-#             struct_features = torch.cat((data, shapes, amino_acids), dim=2)
-#             struct_features_packed = to_packed_sequence(struct_features, length_indices_sorted)
-            
-            
-            # data = data.permute(0, 2, 1)
+
+            _id, struct_features, seqvec, multihot_label = to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label)
+        
             batch_size = data.size()[0]
             opt.zero_grad()
-            logits = model(data, shapes, amino_acids, seqvec)[0]
+            logits = model(struct_features, sorted_lengths, seqvec)[0]
             probs = torch.sigmoid(logits)
             loss = criterion(logits, multihot_label)
             loss.backward()
@@ -171,14 +174,9 @@ def train(args, io):
         test_true = []
         with torch.no_grad():   # set all 'requires_grad' to False
             for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm(test_loader):
-                data, shapes, amino_acids, seqvec, multihot_label = (
-                    data.to(device, dtype=torch.float), 
-                    F.one_hot(shapes.to(device, dtype=torch.long), 9), 
-                    F.one_hot(amino_acids.to(device, dtype=torch.long), 21), 
-                    seqvec.to(device, dtype=torch.float), 
-                    multihot_label.to(device)
-                )
-                # data = data.permute(0, 2, 1)
+                
+                _id, struct_features, seqvec, multihot_label = to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label)
+                
                 batch_size = data.size()[0]
                 logits = model(data, shapes, amino_acids, seqvec)[0]
                 probs = torch.sigmoid(logits)

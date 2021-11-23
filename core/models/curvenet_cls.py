@@ -8,6 +8,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
 from .curvenet_util import *
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 curve_config = {
         'default': [[50, 10], [50, 10], None, None],
@@ -84,7 +85,7 @@ class CurveNet(nn.Module):
         return x, latent_feat
     
 class LSTMWithMetadata(nn.Module):
-    def __init__(self, num_classes=40, k=20, num_input_to_curvenet=1024):
+    def __init__(self, num_classes=40, k=20, num_input_to_curvenet=1024, pack=True):
         # super(CurveNetWithLSTMHead, self).__init__(num_classes, k, num_input_to_curvenet, setting)
         super(LSTMWithMetadata, self).__init__()
         
@@ -94,13 +95,14 @@ class LSTMWithMetadata(nn.Module):
         self.input_size = 3 + self.num_shapes + self.num_aminos
         self.num_lstm_layers = 3
         self.lstm_hidden = 10
+        self.num_input_to_curvenet = num_input_to_curvenet
+        self.pack = pack
         
         self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=self.lstm_hidden, num_layers=self.num_lstm_layers, bidirectional=True, batch_first=True)
         
         self.projection_size = 3
         self.project = nn.Parameter(torch.empty((self.lstm_hidden*2, self.projection_size), **factory_kwargs), requires_grad=True)
         nn.init.xavier_uniform_(self.project)
-#         self.project = nn.Parameter(torch.empty((self.lstm_hidden*2, self.projection_size), **factory_kwargs), requires_grad=True) 
         
         self.fcn1 = nn.Sequential(
             nn.Linear(num_input_to_curvenet * self.projection_size, 256, bias=False),
@@ -119,10 +121,14 @@ class LSTMWithMetadata(nn.Module):
             nn.Dropout(0.5),)
         self.fcn4 = nn.Linear(512, num_classes)
     
-    def forward(self, xyz, shapes, amino_acids, seqvec):
-        # (batch, 3, n_points) -> (batch, n_points, 3)
-        x = torch.cat((xyz, shapes, amino_acids), dim=2) # (Batch, SeqLen, self.input_size)
+    def forward(self, struct_features, sorted_lengths, seqvec):
+        x = struct_features
+        if self.pack:
+            struct_features_packed = pack_padded_sequence(struct_features.cpu(), sorted_lengths.cpu(), batch_first=True, enforce_sorted=True)
+            x = struct_features_packed.cuda().float()
+        
         x, _ = self.lstm(x) # (Batch, SeqLen, self.lstm_hidden*2)
+        x, lengths = pad_packed_sequence(x, batch_first=True, total_length=self.num_input_to_curvenet)
         x = torch.matmul(x, self.project) # (Batch, SeqLen, proj_size)
         x = torch.flatten(x, start_dim=1) # (Batch, SeqLen * proj_size)
         x = self.fcn1(x)
