@@ -143,19 +143,21 @@ class LSTMWithMetadata(nn.Module):
         super(LSTMWithMetadata, self).__init__()
         
         factory_kwargs = {'dtype': torch.float}
+        self.embedding = embedding
+        self.pack = pack
+        
         self.num_shapes = 9
         self.shape_embedding_size = 3
         self.num_aminos = 21
         self.amino_embedding_size = 4
         self.input_size = (3 + self.shape_embedding_size + self.amino_embedding_size) if embedding else (3 + self.num_shapes + self.num_aminos)
-        self.num_lstm_layers = 4
+        self.num_lstm_layers = 4 if self.embedding else 3
         self.lstm_hidden = 32 if embedding else 10
         self.num_input_to_curvenet = num_input_to_curvenet
-        self.pack = pack
-        self.embedding = embedding
         
-        self.shape_embedding = nn.Embedding(self.num_shapes, self.shape_embedding_size)
-        self.amino_embedding = nn.Embedding(self.num_aminos, self.amino_embedding_size)
+        if self.embedding:
+            self.shape_embedding = nn.Embedding(self.num_shapes, self.shape_embedding_size)
+            self.amino_embedding = nn.Embedding(self.num_aminos, self.amino_embedding_size)
         
         self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=self.lstm_hidden, num_layers=self.num_lstm_layers, bidirectional=True, batch_first=True)
         

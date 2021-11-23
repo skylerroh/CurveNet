@@ -323,7 +323,7 @@ def embed(args, io):
     device = torch.device("cuda" if args.cuda else "cpu")
     num_classes = all_loader.dataset.num_label_categories
     #Try to load models
-    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, device=device).to(device)
+    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, embedding=False).to(device, dtype=torch.float)
     model = nn.DataParallel(model)
     model.load_state_dict(torch.load(args.model_path, map_location=device))
 
@@ -333,7 +333,7 @@ def embed(args, io):
     _embeddings = []
     _probs = []
     _labels = []
-    for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm.tqdm(all_loader):
+    for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm(all_loader):
         _id, xyz, shapes, aminos, seqvec, multihot_label, sorted_lengths = to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label, device)
         
         batch_size = data.size()[0]
@@ -343,7 +343,7 @@ def embed(args, io):
         _protein_ids.append(_id)
         _embeddings.append(embs.detach().cpu().numpy())
         _probs.append(probs.detach().cpu().numpy())
-        _labels.append(label.detach().cpu().numpy())
+        _labels.append(multihot_label.detach().cpu().numpy())
     
     protein_ids = np.concatenate(_protein_ids)
     embeddings = np.concatenate(_embeddings)
