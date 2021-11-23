@@ -98,9 +98,9 @@ class LSTMWithMetadata(nn.Module):
         self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=self.lstm_hidden, num_layers=self.num_lstm_layers, bidirectional=True, batch_first=True)
         
         self.projection_size = 3
-        # self.project = nn.Parameter(torch.empty((self.lstm_hidden, self.projection_size), **factory_kwargs), requires_grad=True).to(device=device)
-        # nn.init.xavier_uniform_(self.project)
-        self.project = nn.Parameter(torch.empty((self.lstm_hidden*2, self.projection_size), **factory_kwargs), requires_grad=True) 
+        self.project = nn.Parameter(torch.empty((self.lstm_hidden*2, self.projection_size), **factory_kwargs), requires_grad=True)
+        nn.init.xavier_uniform_(self.project)
+#         self.project = nn.Parameter(torch.empty((self.lstm_hidden*2, self.projection_size), **factory_kwargs), requires_grad=True) 
         
         self.fcn1 = nn.Sequential(
             nn.Linear(num_input_to_curvenet * self.projection_size, 256, bias=False),

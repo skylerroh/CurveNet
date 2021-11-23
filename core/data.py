@@ -146,7 +146,7 @@ def store_point_clouds_w_labels_as_hd5f(name, point_clouds_w_labels, partition, 
 
 def read_point_clouds_w_labels_as_hd5f(name, partition):
     with h5py.File(get_point_cloud_hdf5(name, partition), "r+") as f:
-        return f["protein_id"][:], f["atom_sites"][:], f["shapes"][:], f["amino_acids"][:], f["labels"][:]
+        return f["protein_id"][:], f["atom_sites"][:], f["shapes"][:], f["amino_acids"][:], f["num_atoms"],  f["labels"][:]
 
 
 def one_per_amino_acid(atom_sites: pd.DataFrame):
@@ -387,7 +387,7 @@ class ProteinsExtendedWithMask(Dataset):
         self.num_points = num_points
         self.partition = partition
         self.max_points = 4000
-        self.id, self.data, self.shapes, self.amino_acids, self.seqvec, self.label = self.load_data_cls(partition)
+        self.id, self.data, self.shapes, self.amino_acids, self.seqvec, self.seqlengths, self.label = self.load_data_cls(partition)
         self.augment_data = self.partition in ('train', 'all_with_labels')
         print(f"partition `{partition}`, augment_data with rotation when get item called: {self.augment_data}")
         
@@ -395,7 +395,7 @@ class ProteinsExtendedWithMask(Dataset):
         if not os.path.exists(DATA_DIR):
             raise Exception("first download structure_files into project root")
         create_protein_point_clouds(name=self.name, num_points=self.max_points, overwrite=overwrite)
-        all_id, all_data, all_shapes, all_amino_acids, all_label = read_point_clouds_w_labels_as_hd5f(name=self.name, partition=partition)
+        all_id, all_data, all_shapes, all_amino_acids, all_seqlengths, all_label = read_point_clouds_w_labels_as_hd5f(name=self.name, partition=partition)
         
         # add seqvec to data 
         with open(f"{DATA_DIR}/seqvec_vectors.pkl", "rb") as fh:
@@ -405,7 +405,7 @@ class ProteinsExtendedWithMask(Dataset):
         print(all_id.shape)
         print(all_data.shape)
         print(all_label.shape)
-        return all_id, all_data,  all_shapes, all_amino_acids, all_seqvec, all_label
+        return all_id, all_data,  all_shapes, all_amino_acids, all_seqvec, all_seqlengths, all_label
 
 
     def __getitem__(self, item):
@@ -414,10 +414,11 @@ class ProteinsExtendedWithMask(Dataset):
         shapes = self.shapes[item]
         seqvec = self.seqvec[item]
         pointcloud = self.data[item]
+        seqlen = self.seqlengths[item]
         label = self.label[item]
         if self.augment_data:
             pointcloud = rotate_pointcloud(pointcloud)
-        return _id, pointcloud, shapes, amino_acids, seqvec, label
+        return _id, pointcloud, shapes, amino_acids, seqvec, seqlen, label
 
     def __len__(self):
         return self.data.shape[0]

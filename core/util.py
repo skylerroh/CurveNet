@@ -14,6 +14,12 @@ from evaluation import *
 # import torch.nn.BCELoss
 # import torch.nn.BCEWithLogitsLoss
 
+from sklearn.exceptions import UndefinedMetricWarning
+
+def warn(*args, **kwargs):
+    pass
+import warnings
+warnings.warn = warn
 
 def cal_loss(pred, gold, smoothing=0.0, label_weights=None, pos_weights=None):
     ''' Calculate cross entropy loss, apply label smoothing if needed. '''

@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader
 from util import cal_loss, IOStream, evaluate
 import sklearn.metrics as metrics
 from torchsummary import summary
-
+from torch.nn.utils.rnn import pack_padded_sequence
 
 def _init_():
     # fix random seed
@@ -50,7 +50,21 @@ def _init_():
     os.system('cp main_cls.py ../checkpoints/'+args.exp_name+'/main_cls.py.backup')
     os.system('cp models/curvenet_cls.py ../checkpoints/'+args.exp_name+'/curvenet_cls.py.backup')
 
+
+def sort_length_indices(lengths):
+    lengths, sorted_indices = torch.sort(lengths, descending=True)
+    sorted_indices = sorted_indices.to(input.device)
+    return sorted_indices
+
+
+def reorder_batch_by_length(input):
+    return input.index_select(batch_dim, sorted_indices)
+
+
+def to_packed_sequence(input, sorted_indices):
+    return pack_padded_sequence(input.index_select(0, sorted_indices), lengths, batch_first=True, enforce_sorted=True)
     
+
 def train(args, io):
     train_loader = DataLoader(ProteinsExtendedWithMask(partition='train', num_points=args.num_points), num_workers=8,
                               batch_size=args.batch_size, shuffle=True, drop_last=True)
@@ -89,7 +103,7 @@ def train(args, io):
     
     criterion = lambda x, y: cal_loss(x, y, smoothing=0.0, label_weights=icvec, pos_weights=pos_weights)
 
-    best_test_loss = 0
+    best_test_loss = float("inf")
     best_metrics = None
     for epoch in range(args.epochs):
         ####################
@@ -100,18 +114,27 @@ def train(args, io):
         model.train()
         train_prob = []
         train_true = []
-        for _id, data, shapes, amino_acids, seqvec, multihot_label in train_loader:
-            data, shapes, amino_acids, seqvec, multihot_label = (
+        for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in train_loader:
+            
+            data, shapes, amino_acids, seqvec, lengths, multihot_label = (
                 data.to(device, dtype=torch.float), 
                 F.one_hot(shapes.to(device, dtype=torch.long), 9), 
                 F.one_hot(amino_acids.to(device, dtype=torch.long), 21), 
                 seqvec.to(device, dtype=torch.float), 
+                lengths.to(device, dtype=torch.int),
                 multihot_label.to(device)
             )
+            
+            # length_indices_sorted = sort_length_indices(lengths)
+            # _id = reorder_batch_by_length(_id, length_indices_sorted)
+            # struct_features = torch.cat((data, shapes, amino_acids), dim=2)
+            # struct_features_packed = to_packed_sequence(struct_features, length_indices_sorted)
+            
+            
             # data = data.permute(0, 2, 1)
             batch_size = data.size()[0]
             opt.zero_grad()
-            logits = model(data, shapes, amino_acids, seqvec)[0]
+            logits = model(struct_features_packed, seqvec)[0]
             probs = torch.sigmoid(logits)
             loss = criterion(logits, multihot_label)
             loss.backward()
@@ -146,7 +169,7 @@ def train(args, io):
         test_prob = []
         test_true = []
         with torch.no_grad():   # set all 'requires_grad' to False
-            for _id, data, shapes, amino_acids, seqvec, multihot_label in train_loader:
+            for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in train_loader:
                 data, shapes, amino_acids, seqvec, multihot_label = (
                     data.to(device, dtype=torch.float), 
                     F.one_hot(shapes.to(device, dtype=torch.long), 9), 
@@ -166,15 +189,14 @@ def train(args, io):
             test_true = np.concatenate(test_true)
             test_prob = np.concatenate(test_prob)
         
-        test_eval_metrics = evaluate(test_true, test_prob, icvec_np, nth=10)
+        test_eval_metrics = evaluate(test_true, test_prob, icvec_np, nth=50)
         outstr = 'Test %d, loss: %.6f, ' % (epoch, test_loss*1.0/count) + "test metrics: {}".format({k: "%.6f" % v for k, v in test_eval_metrics.items()})
         io.cprint(outstr)
-        if test_loss <= best_test_less:
-            test_metrics["loss"] = test_loss
-            best_test_loss = test_loss
-            best_metrics = test_metrics
+        if test_loss*1.0/count <= best_test_loss:
+            best_test_loss = test_loss*1.0/count
+            best_metrics = test_eval_metrics
             torch.save(model.state_dict(), '../checkpoints/%s/models/model.t7' % args.exp_name)
-        io.cprint('best: %.3f' % best_test_loss)
+        io.cprint('best: %.4f, ' % best_test_loss + "test metrics: {}".format({k: "%.6f" % v for k, v in best_metrics.items()}))
 
         
 def test(args, io):
