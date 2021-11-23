@@ -146,7 +146,7 @@ def store_point_clouds_w_labels_as_hd5f(name, point_clouds_w_labels, partition, 
 
 def read_point_clouds_w_labels_as_hd5f(name, partition):
     with h5py.File(get_point_cloud_hdf5(name, partition), "r+") as f:
-        return f["protein_id"][:], f["atom_sites"][:], f["shapes"][:], f["amino_acids"][:], f["num_atoms"],  f["labels"][:]
+        return f["protein_id"][:], f["atom_sites"][:], f["shapes"][:], f["amino_acids"][:], f["num_atoms"][:],  f["labels"][:]
 
 
 def one_per_amino_acid(atom_sites: pd.DataFrame):

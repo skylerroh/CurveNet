@@ -28,6 +28,7 @@ from util import cal_loss, IOStream, evaluate
 import sklearn.metrics as metrics
 from torchsummary import summary
 from torch.nn.utils.rnn import pack_padded_sequence
+from tqdm import tqdm
 
 def _init_():
     # fix random seed
@@ -114,7 +115,7 @@ def train(args, io):
         model.train()
         train_prob = []
         train_true = []
-        for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in train_loader:
+        for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm(train_loader):
             
             data, shapes, amino_acids, seqvec, lengths, multihot_label = (
                 data.to(device, dtype=torch.float), 
@@ -125,16 +126,16 @@ def train(args, io):
                 multihot_label.to(device)
             )
             
-            # length_indices_sorted = sort_length_indices(lengths)
-            # _id = reorder_batch_by_length(_id, length_indices_sorted)
-            # struct_features = torch.cat((data, shapes, amino_acids), dim=2)
-            # struct_features_packed = to_packed_sequence(struct_features, length_indices_sorted)
+#             length_indices_sorted = sort_length_indices(lengths)
+#             _id = reorder_batch_by_length(_id, length_indices_sorted)
+#             struct_features = torch.cat((data, shapes, amino_acids), dim=2)
+#             struct_features_packed = to_packed_sequence(struct_features, length_indices_sorted)
             
             
             # data = data.permute(0, 2, 1)
             batch_size = data.size()[0]
             opt.zero_grad()
-            logits = model(struct_features_packed, seqvec)[0]
+            logits = model(data, shapes, amino_acids, seqvec)[0]
             probs = torch.sigmoid(logits)
             loss = criterion(logits, multihot_label)
             loss.backward()
@@ -169,7 +170,7 @@ def train(args, io):
         test_prob = []
         test_true = []
         with torch.no_grad():   # set all 'requires_grad' to False
-            for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in train_loader:
+            for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm(test_loader):
                 data, shapes, amino_acids, seqvec, multihot_label = (
                     data.to(device, dtype=torch.float), 
                     F.one_hot(shapes.to(device, dtype=torch.long), 9), 

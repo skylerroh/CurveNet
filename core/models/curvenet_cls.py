@@ -118,20 +118,6 @@ class LSTMWithMetadata(nn.Module):
             nn.BatchNorm1d(512),
             nn.Dropout(0.5),)
         self.fcn4 = nn.Linear(512, num_classes)
-        
-#     def choose_n_points(self, xyz):
-#         # (batch, 3, n_points) -> (batch, n_points, 3)
-#         xyz = torch.swapaxes(xyz, 1, 2)
-#         lstm_out, lstm_grad = self.lstm_head(xyz)
-#         # flatten bidirectional output to two features per point
-#         # input one hidden layer to extract single value per point
-#         out = self.linear1(torch.flatten(lstm_out, start_dim=1))
-        
-#         # gather top values to move on to curvenet
-#         topk_val, topk_ind = torch.topk(out, self.num_input_to_curvenet, dim=1)
-#         topk_points = torch.gather(xyz, 1, topk_ind.unsqueeze(-1).repeat(1, 1, 3))
-#         shuffled = self.shuffle(topk_points)
-#         return torch.swapaxes(shuffled, 1, 2)
     
     def forward(self, xyz, shapes, amino_acids, seqvec):
         # (batch, 3, n_points) -> (batch, n_points, 3)
