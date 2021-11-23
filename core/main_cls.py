@@ -65,24 +65,27 @@ def reorder_batch_by_length(tensor_input, sorted_indices):
 def to_packed_sequence(tensor_input, sorted_lengths, sorted_indices):
     return pack_padded_sequence(reorder_batch_by_length(tensor_input, sorted_indices), sorted_lengths, batch_first=True, enforce_sorted=True)
     
-def to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label, device):
-    _shapes = F.one_hot(shapes.long(), 9)
-    _amino_acids = F.one_hot(amino_acids.long(), 21)
+    
+def to_input_tensors(_id, xyz, shapes, aminos, seqvec, lengths, multihot_label, device):
+    # _shapes = F.one_hot(shapes.long(), 9)
+    # _amino_acids = F.one_hot(amino_acids.long(), 21)
 
     sorted_lengths, length_indices_sorted = sort_length_indices(lengths)
     sorted_lengths = torch.clip(sorted_lengths, max=args.num_points)
     
     _id = np.array(_id)[length_indices_sorted.cpu().numpy()]
-    struct_features = torch.cat((data, _shapes, _amino_acids), dim=2)
-    
-    struct_features, seqvec, multihot_label = [reorder_batch_by_length(_tensor, length_indices_sorted) for _tensor in (struct_features, seqvec, multihot_label)]
-    struct_features_packed, seqvec, multihot_label = (
-        struct_features.to(dtype=torch.float), 
+
+    xyz, shapes, aminos, seqvec, multihot_label = [reorder_batch_by_length(_tensor, length_indices_sorted) for _tensor in [xyz, shapes, aminos, seqvec, multihot_label]]
+
+    xyz, shapes, aminos, seqvec, multihot_label = (
+        xyz.to(dtype=torch.float), 
+        shapes.to(dtype=torch.long), 
+        aminos.to(dtype=torch.long), 
         seqvec.to(device, dtype=torch.float), 
         multihot_label.to(device)
     )
 
-    return _id, struct_features, seqvec, multihot_label, sorted_lengths
+    return _id, xyz, shapes, aminos, seqvec, multihot_label, sorted_lengths
         
 
 def train(args, io):
@@ -105,7 +108,7 @@ def train(args, io):
     icvec = torch.from_numpy(icvec_np).to(device)
     pos_weights = torch.from_numpy(labelsData.pos_weights).to(device)
     
-    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device, dtype=torch.float)
+    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, embedding=False).to(device, dtype=torch.float)
     model = nn.DataParallel(model)
     # print(summary(model, [(32, 4000,3), (32,4000,9), (32, 4000,21), (32, 4000, 1024)]))
 
@@ -136,11 +139,11 @@ def train(args, io):
         train_true = []
         for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm(train_loader):
 
-            _id, struct_features, seqvec, multihot_label, sorted_lengths = to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label, device)
+            _id, xyz, shapes, aminos, seqvec, multihot_label, sorted_lengths = to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label, device)
         
             batch_size = data.size()[0]
             opt.zero_grad()
-            logits = model(struct_features, sorted_lengths, seqvec)[0]
+            logits = model(xyz, shapes, aminos, sorted_lengths, seqvec)[0]
             probs = torch.sigmoid(logits)
             loss = criterion(logits, multihot_label)
             loss.backward()
@@ -177,10 +180,10 @@ def train(args, io):
         with torch.no_grad():   # set all 'requires_grad' to False
             for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm(test_loader):
                 
-                _id, struct_features, seqvec, multihot_label, sorted_lengths = to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label, device)
+                _id, xyz, shapes, aminos, seqvec, multihot_label, sorted_lengths = to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label, device)
                 
                 batch_size = data.size()[0]
-                logits = model(struct_features, sorted_lengths, seqvec)[0]
+                logits = model(xyz, shapes, aminos, sorted_lengths, seqvec)[0]
                 probs = torch.sigmoid(logits)
                 loss = criterion(logits, multihot_label)
                 count += batch_size
@@ -248,7 +251,7 @@ def train_all(args, io):
     icvec = torch.from_numpy(icvec_np).to(device)
     pos_weights = torch.from_numpy(labelsData.pos_weights).to(device)
     
-    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, device=device).to(device)
+    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, embedding=False).to(device, dtype=torch.float)
     model = nn.DataParallel(model)
 
     if args.use_sgd:
@@ -274,12 +277,13 @@ def train_all(args, io):
         model.train()
         train_prob = []
         train_true = []
-        for _id, data, seqvec, multihot_label in train_loader:
-            data, seqvec, multihot_label = data.to(device, dtype=torch.float), seqvec.to(device, dtype=torch.float), multihot_label.to(device)
-            data = data.permute(0, 2, 1)
+        for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm(train_loader):
+            
+            _id, xyz, shapes, aminos, seqvec, multihot_label, sorted_lengths = to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label, device)
+            
             batch_size = data.size()[0]
             opt.zero_grad()
-            logits = model(data, seqvec)[0]
+            logits = model(xyz, shapes, aminos, sorted_lengths, seqvec)[0]
             probs = torch.sigmoid(logits)
             loss = criterion(logits, multihot_label)
             loss.backward()
@@ -326,14 +330,14 @@ def embed(args, io):
     _embeddings = []
     _probs = []
     _labels = []
-    for protein_id, data, label in tqdm.tqdm(all_loader):
-        data, label = data.float().to(device), label.to(device).squeeze()
-        data = data.permute(0, 2, 1)
+    for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm.tqdm(all_loader):
+        _id, xyz, shapes, aminos, seqvec, multihot_label, sorted_lengths = to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label, device)
+        
         batch_size = data.size()[0]
-        logits, embs = model(data)
+        logits, embs = model(xyz, shapes, aminos, sorted_lengths, seqvec)
         probs = torch.sigmoid(logits)
         
-        _protein_ids.append(protein_id)
+        _protein_ids.append(_id)
         _embeddings.append(embs.detach().cpu().numpy())
         _probs.append(probs.detach().cpu().numpy())
         _labels.append(label.detach().cpu().numpy())

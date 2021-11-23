@@ -84,19 +84,78 @@ class CurveNet(nn.Module):
         x = self.conv2(x)
         return x, latent_feat
     
+# class LSTMWithMetadata(nn.Module):
+#     def __init__(self, num_classes=40, k=20, num_input_to_curvenet=1024, pack=True):
+#         # super(CurveNetWithLSTMHead, self).__init__(num_classes, k, num_input_to_curvenet, setting)
+#         super(LSTMWithMetadata, self).__init__()
+        
+#         factory_kwargs = {'dtype': torch.float}
+#         self.num_shapes = 9
+#         self.num_aminos = 21
+#         self.input_size = 3 + self.num_shapes + self.num_aminos
+#         self.num_lstm_layers = 3
+#         self.lstm_hidden = 10
+#         self.num_input_to_curvenet = num_input_to_curvenet
+#         self.pack = pack
+        
+#         self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=self.lstm_hidden, num_layers=self.num_lstm_layers, bidirectional=True, batch_first=True)
+        
+#         self.projection_size = 3
+#         self.project = nn.Parameter(torch.empty((self.lstm_hidden*2, self.projection_size), **factory_kwargs), requires_grad=True)
+#         nn.init.xavier_uniform_(self.project)
+        
+#         self.fcn1 = nn.Sequential(
+#             nn.Linear(num_input_to_curvenet * self.projection_size, 256, bias=False),
+#             nn.ReLU(inplace=True),
+#             nn.BatchNorm1d(256),
+#             nn.Dropout(0.5),)
+#         self.fcn2 = nn.Sequential(
+#             nn.Linear(256 + 1024, 1024, bias=False),
+#             nn.ReLU(inplace=True),
+#             nn.BatchNorm1d(1024),
+#             nn.Dropout(0.5),)
+#         self.fcn3 = nn.Sequential(
+#             nn.Linear(1024, 512, bias=False),
+#             nn.ReLU(inplace=True),
+#             nn.BatchNorm1d(512),
+#             nn.Dropout(0.5),)
+#         self.fcn4 = nn.Linear(512, num_classes)
+    
+#     def forward(self, struct_features, sorted_lengths, seqvec):
+#         x = struct_features
+#         if self.pack:
+#             struct_features_packed = pack_padded_sequence(struct_features.cpu(), sorted_lengths.cpu(), batch_first=True, enforce_sorted=True)
+#             x = struct_features_packed.cuda().float()
+        
+#         x, _ = self.lstm(x) # (Batch, SeqLen, self.lstm_hidden*2)
+#         x, lengths = pad_packed_sequence(x, batch_first=True, total_length=self.num_input_to_curvenet)
+#         x = torch.matmul(x, self.project) # (Batch, SeqLen, proj_size)
+#         x = torch.flatten(x, start_dim=1) # (Batch, SeqLen * proj_size)
+#         x = self.fcn1(x)
+#         x = torch.cat((x, seqvec), dim=1).squeeze(-1)
+#         latent_feat = self.fcn2(x)
+#         x = self.fcn3(latent_feat)
+#         x = self.fcn4(x)
+#         return x, None
+    
 class LSTMWithMetadata(nn.Module):
-    def __init__(self, num_classes=40, k=20, num_input_to_curvenet=1024, pack=True):
-        # super(CurveNetWithLSTMHead, self).__init__(num_classes, k, num_input_to_curvenet, setting)
+    def __init__(self, num_classes=40, k=20, num_input_to_curvenet=1024, pack=True, embedding=False):
         super(LSTMWithMetadata, self).__init__()
         
         factory_kwargs = {'dtype': torch.float}
         self.num_shapes = 9
+        self.shape_embedding_size = 3
         self.num_aminos = 21
-        self.input_size = 3 + self.num_shapes + self.num_aminos
-        self.num_lstm_layers = 3
-        self.lstm_hidden = 10
+        self.amino_embedding_size = 4
+        self.input_size = (3 + self.shape_embedding_size + self.amino_embedding_size) if embedding else (3 + self.num_shapes + self.num_aminos)
+        self.num_lstm_layers = 4
+        self.lstm_hidden = 32 if embedding else 10
         self.num_input_to_curvenet = num_input_to_curvenet
         self.pack = pack
+        self.embedding = embedding
+        
+        self.shape_embedding = nn.Embedding(self.num_shapes, self.shape_embedding_size)
+        self.amino_embedding = nn.Embedding(self.num_aminos, self.amino_embedding_size)
         
         self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=self.lstm_hidden, num_layers=self.num_lstm_layers, bidirectional=True, batch_first=True)
         
@@ -109,8 +168,9 @@ class LSTMWithMetadata(nn.Module):
             nn.ReLU(inplace=True),
             nn.BatchNorm1d(256),
             nn.Dropout(0.5),)
+        fc2_input = (self.num_lstm_layers * 2 * self.lstm_hidden) if embedding else 256
         self.fcn2 = nn.Sequential(
-            nn.Linear(256 + 1024, 1024, bias=False),
+            nn.Linear(fc2_input + 1024, 1024, bias=False),
             nn.ReLU(inplace=True),
             nn.BatchNorm1d(1024),
             nn.Dropout(0.5),)
@@ -121,19 +181,40 @@ class LSTMWithMetadata(nn.Module):
             nn.Dropout(0.5),)
         self.fcn4 = nn.Linear(512, num_classes)
     
-    def forward(self, struct_features, sorted_lengths, seqvec):
-        x = struct_features
+    def forward(self, xyz, shapes, aminos, sorted_lengths, seqvec):
         if self.pack:
+            if self.embedding:
+                # xyz_packed = pack_padded_sequence(xyz.cpu(), sorted_lengths.cpu(), batch_first=True, enforce_sorted=True).cuda()
+                # shapes_packed = pack_padded_sequence(shapes.cpu(), sorted_lengths.cpu(), batch_first=True, enforce_sorted=True).cuda()
+                # aminos_packed = pack_padded_sequence(aminos.cpu(), sorted_lengths.cpu(), batch_first=True, enforce_sorted=True).cuda()
+
+                shapes_emb = self.shape_embedding(shapes)
+                aminos_emb = self.amino_embedding(aminos)
+                struct_features = torch.cat((xyz, shapes_emb, aminos_emb), dim=2)
+            
+            else:
+                shapes_onehot = F.one_hot(shapes, self.num_shapes)
+                aminos_onehot = F.one_hot(aminos, self.num_aminos)
+                struct_features = torch.cat((xyz, shapes_onehot, aminos_onehot), dim=2)
+            
             struct_features_packed = pack_padded_sequence(struct_features.cpu(), sorted_lengths.cpu(), batch_first=True, enforce_sorted=True)
             x = struct_features_packed.cuda().float()
         
-        x, _ = self.lstm(x) # (Batch, SeqLen, self.lstm_hidden*2)
-        x, lengths = pad_packed_sequence(x, batch_first=True, total_length=self.num_input_to_curvenet)
-        x = torch.matmul(x, self.project) # (Batch, SeqLen, proj_size)
-        x = torch.flatten(x, start_dim=1) # (Batch, SeqLen * proj_size)
-        x = self.fcn1(x)
-        x = torch.cat((x, seqvec), dim=1).squeeze(-1)
+        x, (h_n, c_n) = self.lstm(x) # (Batch, SeqLen, self.lstm_hidden*2)
+        
+        # embedding 
+        if self.embedding:                                   
+            x = torch.cat((torch.flatten(torch.permute(h_n, [1, 0, 2]), start_dim=1), seqvec), dim=1).squeeze(-1)
+        
+        # onehot
+        else:
+            x, lengths = pad_packed_sequence(x, batch_first=True, total_length=self.num_input_to_curvenet)
+            x = torch.matmul(x, self.project) # (Batch, SeqLen, proj_size)
+            x = torch.flatten(x, start_dim=1) # (Batch, SeqLen * proj_size)
+            x = self.fcn1(x)
+            x = torch.cat((x, seqvec), dim=1)
+
         latent_feat = self.fcn2(x)
         x = self.fcn3(latent_feat)
         x = self.fcn4(x)
-        return x, None
+        return x, latent_feat
