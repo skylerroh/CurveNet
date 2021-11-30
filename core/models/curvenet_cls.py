@@ -151,7 +151,7 @@ class LSTMWithMetadata(nn.Module):
         self.num_aminos = 21
         self.amino_embedding_size = 4
         self.input_size = (3 + self.shape_embedding_size + self.amino_embedding_size) if embedding else (3 + self.num_shapes + self.num_aminos)
-        self.num_lstm_layers = 4 if self.embedding else 3
+        self.num_lstm_layers = 4 if self.embedding else 6
         self.lstm_hidden = 32 if embedding else 10
         self.num_input_to_curvenet = num_input_to_curvenet
         
@@ -161,7 +161,7 @@ class LSTMWithMetadata(nn.Module):
         
         self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=self.lstm_hidden, num_layers=self.num_lstm_layers, bidirectional=True, batch_first=True)
         
-        self.projection_size = 3
+        self.projection_size = 4
         self.project = nn.Parameter(torch.empty((self.lstm_hidden*2, self.projection_size), **factory_kwargs), requires_grad=True)
         nn.init.xavier_uniform_(self.project)
         

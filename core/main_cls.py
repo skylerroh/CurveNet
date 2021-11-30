@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR, CosineAnnealingWarmRestarts
 from data import ProteinsSampled, ProteinsExtended, ProteinsExtendedWithMask, load_labels
 from models.curvenet_cls import CurveNet, LSTMWithMetadata
 import numpy as np
@@ -123,7 +123,7 @@ def train(args, io):
         opt = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     if args.scheduler == 'cos':
-        scheduler = CosineAnnealingLR(opt, args.epochs, eta_min=1e-3)
+        scheduler = CosineAnnealingWarmRestarts(opt, T_0=args.epochs//4, eta_min=1e-3)
     elif args.scheduler == 'step':
         scheduler = MultiStepLR(opt, [120, 160], gamma=0.1)
     
@@ -265,7 +265,7 @@ def train_all(args, io):
         opt = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     if args.scheduler == 'cos':
-        scheduler = CosineAnnealingLR(opt, args.epochs, eta_min=1e-3)
+        scheduler = CosineAnnealingWarmRestarts(opt, T_0=args.epochs//2, eta_min=1e-3)
     elif args.scheduler == 'step':
         scheduler = MultiStepLR(opt, [120, 160], gamma=0.1)
     
