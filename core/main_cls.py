@@ -123,7 +123,7 @@ def train(args, io):
         opt = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     if args.scheduler == 'cos':
-        scheduler = CosineAnnealingWarmRestarts(opt, T_0=args.epochs//4, eta_min=1e-3)
+        scheduler = CosineAnnealingWarmRestarts(opt, T_0=args.epochs//2, eta_min=1e-3)
     elif args.scheduler == 'step':
         scheduler = MultiStepLR(opt, [120, 160], gamma=0.1)
     
