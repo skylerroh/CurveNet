@@ -172,16 +172,26 @@ class LSTMWithMetadata(nn.Module):
             nn.Dropout(0.5),)
         fc2_input = (self.num_lstm_layers * 2 * self.lstm_hidden) if embedding else 256
         self.fcn2 = nn.Sequential(
-            nn.Linear(fc2_input + 1024, 1024, bias=False),
+            nn.Linear(fc2_input + 1024, 256, bias=False),
             nn.ReLU(inplace=True),
-            nn.BatchNorm1d(1024),
+            nn.BatchNorm1d(256),
             nn.Dropout(0.5),)
         self.fcn3 = nn.Sequential(
-            nn.Linear(1024, 512, bias=False),
+            nn.Linear(256, 256, bias=False),
             nn.ReLU(inplace=True),
-            nn.BatchNorm1d(512),
+            nn.BatchNorm1d(256),
             nn.Dropout(0.5),)
-        self.fcn4 = nn.Linear(512, num_classes)
+        self.fcn4 = nn.Sequential(
+            nn.Linear(256, 256, bias=False),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.5),)
+        self.fcn5 = nn.Sequential(
+            nn.Linear(256, 256, bias=False),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.5),)
+        self.fcn6 = nn.Linear(256, num_classes)
     
     def forward(self, xyz, shapes, aminos, sorted_lengths, seqvec):
         if self.pack:
@@ -216,7 +226,10 @@ class LSTMWithMetadata(nn.Module):
             x = self.fcn1(x)
             x = torch.cat((x, seqvec), dim=1)
 
-        latent_feat = self.fcn2(x)
-        x = self.fcn3(latent_feat)
-        x = self.fcn4(x)
-        return x, latent_feat
+        fc2_out = self.fcn2(x)
+        fc3_out = self.fcn3(fc2_out)
+        fc4_out = self.fcn4(fc3_out)
+        fc5_out = self.fcn5(fc4_out)
+        x = self.fcn6(fc5_out)
+        return x, torch.cat((fc2_out, fc3_out, fc4_out, fc5_out), dim=1)
+    
