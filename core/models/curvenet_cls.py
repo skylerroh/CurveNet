@@ -167,28 +167,28 @@ class LSTMWithMetadata(nn.Module):
         
         self.fcn1 = nn.Sequential(
             nn.Linear(num_input_to_curvenet * self.projection_size, 256, bias=False),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.1, inplace=True),
             nn.BatchNorm1d(256),
             nn.Dropout(0.5),)
         fc2_input = (self.num_lstm_layers * 2 * self.lstm_hidden) if embedding else 256
         self.fcn2 = nn.Sequential(
             nn.Linear(fc2_input + 1024, 256, bias=False),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.1, inplace=True),
             nn.BatchNorm1d(256),
             nn.Dropout(0.5),)
         self.fcn3 = nn.Sequential(
             nn.Linear(256, 256, bias=False),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.1, inplace=True),
             nn.BatchNorm1d(256),
             nn.Dropout(0.5),)
         self.fcn4 = nn.Sequential(
             nn.Linear(256, 256, bias=False),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.1, inplace=True),
             nn.BatchNorm1d(256),
             nn.Dropout(0.5),)
         self.fcn5 = nn.Sequential(
             nn.Linear(256, 256, bias=False),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.1, inplace=True),
             nn.BatchNorm1d(256),
             nn.Dropout(0.5),)
         self.fcn6 = nn.Linear(256, num_classes)
