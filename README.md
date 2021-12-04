@@ -1,4 +1,4 @@
-The following repo contains adaptations forked from the original CurveNet code that can be found in [this github repo](https://github.com/tiangexiang/CurveNet). The adaptations were made as part of submodule to FA2021 UCB MIDS capstone project https://github.com/dptrsa-300/pss. 
+The following repo contains adaptations forked from the original CurveNet code that can be found in https://github.com/tiangexiang/CurveNet. The adaptations were made as part of submodule to FA2021 UCB MIDS capstone project https://github.com/dptrsa-300/pss. 
 The modifications found in this repo include: 
     - significant changes to core/data.py processing to accomodate necessary changes for importing atom location data and attaching provided labels
     - adding stacked LSTM based model for comparison
