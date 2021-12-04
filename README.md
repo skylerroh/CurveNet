@@ -1,3 +1,10 @@
+The following repo contains adaptations forked from the original CurveNet code that can be found in [this github repo](https://github.com/tiangexiang/CurveNet). The adaptations were made as part of submodule to FA2021 UCB MIDS capstone project https://github.com/dptrsa-300/pss. 
+The modifications found in this repo include: 
+    - significant changes to core/data.py processing to accomodate necessary changes for importing atom location data and attaching provided labels
+    - adding stacked LSTM based model for comparison
+    - change learning rate schedule to cosine annealing with warm restarts
+    - add functions to train on all data and extract second layer latent feature space
+
 # CurveNet
 Official implementation of "Walk in the Cloud: Learning Curves for Point Clouds Shape Analysis", ICCV 2021
 
