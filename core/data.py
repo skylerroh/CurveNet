@@ -19,6 +19,8 @@ import numpy as np
 import os
 import sys
 import torch
+import pandas as pd
+import pickle5 as pickle
 from dataclasses import dataclass
 from torch.utils.data import Dataset
 
@@ -32,6 +34,43 @@ POINT_CLOUD_HDF5 = lambda x, y: f"{POINT_CLOUD_DIR(x)}/{y}_protein_point_clouds.
 
 EVAL_PCT = 0.2
 
+PAD = 'PAD'
+
+SHAPE_TO_INDEX = {
+ None: 0,
+ 'BEND': 1,
+ 'HELX_LH_PP_P': 2,
+ 'HELX_RH_3T_P': 3,
+ 'HELX_RH_AL_P': 4,
+ 'HELX_RH_PI_P': 5,
+ 'STRN': 6,
+ 'TURN_TY1_P': 7,
+ PAD: 8,
+}
+
+AA_TO_INDEX = {
+ 'ALA': 0,
+ 'ARG': 1,
+ 'ASN': 2,
+ 'ASP': 3,
+ 'CYS': 4,
+ 'GLN': 5,
+ 'GLU': 6,
+ 'GLY': 7,
+ 'HIS': 8,
+ 'ILE': 9,
+ 'LEU': 10,
+ 'LYS': 11,
+ 'MET': 12,
+ 'PHE': 13,
+ 'PRO': 14,
+ 'SER': 15,
+ 'THR': 16,
+ 'TRP': 17,
+ 'TYR': 18,
+ 'VAL': 19,
+ PAD: 20,
+}
 
 def get_point_cloud_dir(name):
     return os.path.join(BASE_POINT_CLOUD_DIR, name)
@@ -45,6 +84,8 @@ def get_point_cloud_hdf5(name, train_test):
 class ProteinPointCloud:
     protein_id: str
     atom_sites: np.ndarray
+    shapes: np.ndarray
+    aas: np.ndarray # AminoAcids
     num_atoms: int
     
     def labels_to_multihot(self, labels, N):
@@ -58,6 +99,8 @@ class ProteinPointCloud:
         return ProteinPointCloudWLabel(
             protein_id=self.protein_id,
             atom_sites=self.atom_sites,
+            shapes=self.shapes,
+            aas=self.aas,
             num_atoms=self.num_atoms,
             labels=self.labels_to_multihot(label_lookup_dict.get(self.protein_id), n_categories))
 
@@ -66,6 +109,8 @@ class ProteinPointCloud:
 class ProteinPointCloudWLabel:
     protein_id: str
     atom_sites: np.ndarray
+    shapes: np.ndarray
+    aas: np.ndarray # AminoAcids
     num_atoms: int
     labels: np.ndarray
 
@@ -78,12 +123,18 @@ def store_point_clouds_w_labels_as_hd5f(name, point_clouds_w_labels, partition, 
     with h5py.File(get_point_cloud_hdf5(name, partition), "w") as f:
         points = np.stack([p.atom_sites for p in point_clouds_w_labels])
         print(points.shape)
-        print((N,num_points,3))
+        
         f.create_dataset("atom_sites", shape=(N,num_points,3), dtype=np.dtype(float),
                          data=points)
             
         f.create_dataset("protein_id", shape=(N,), dtype=h5py.string_dtype(),
                          data=[p.protein_id for p in point_clouds_w_labels])
+        
+        f.create_dataset("shapes", shape=(N,num_points), dtype='i8',
+                         data=[p.shapes for p in point_clouds_w_labels])
+        
+        f.create_dataset("amino_acids", shape=(N,num_points), dtype='i8',
+                         data=[p.aas for p in point_clouds_w_labels])
         
         f.create_dataset("labels", shape=(N, n_categories), dtype=np.dtype(float),
                          data=[p.labels for p in point_clouds_w_labels])
@@ -95,7 +146,7 @@ def store_point_clouds_w_labels_as_hd5f(name, point_clouds_w_labels, partition, 
 
 def read_point_clouds_w_labels_as_hd5f(name, partition):
     with h5py.File(get_point_cloud_hdf5(name, partition), "r+") as f:
-        return f["protein_id"][:], f["atom_sites"][:], f["labels"][:]
+        return f["protein_id"][:], f["atom_sites"][:], f["shapes"][:], f["amino_acids"][:], f["num_atoms"][:],  f["labels"][:]
 
 
 def one_per_amino_acid(atom_sites: pd.DataFrame):
@@ -111,16 +162,30 @@ def mask_by_confidence(atom_group):
     
     
 def protein_to_sampled_point_cloud(atom_sites: pd.DataFrame, num_points: int):
+    shapes = atom_sites["shape.conf_type_id"].apply(lambda x: SHAPE_TO_INDEX[x]).to_numpy()
+    aas = atom_sites["label_comp_id"].apply(lambda x: AA_TO_INDEX[x]).to_numpy()
     atom_sites = protein_pandas_to_numpy(atom_sites).astype(float)
-    if atom_sites.shape[0] <= num_points:
-        padded = np.concatenate([atom_sites, np.zeros((num_points - atom_sites.shape[0], 3))])
-        assert(padded.shape == (num_points, 3))
-        return padded
+    
+    def assertAllOfSize(arrays, shape):
+        for a in arrays:
+            assert(a.shape == shape, f"got {a.shape}, expected {shape}")
+    if atom_sites.shape[0] == 0: 
+        return None, None, None
+    elif atom_sites.shape[0] <= num_points:
+        num_pad = num_points - atom_sites.shape[0]
+        padded = np.concatenate([atom_sites, np.zeros((num_pad, 3))])
+        padded_shapes = np.concatenate([shapes, np.repeat(SHAPE_TO_INDEX[PAD], num_pad)])
+        padded_AA = np.concatenate([aas, np.repeat(AA_TO_INDEX[PAD], num_pad)])
+        assertAllOfSize([padded, padded_shapes, padded_AA], (num_points, 3))
+        return padded, padded_shapes, padded_AA
+
     else:
         idx = np.sort(np.random.choice(np.arange(0, atom_sites.shape[0]), size=num_points, replace=False))
         sampled = atom_sites[idx,:]
-        assert (sampled.shape == (num_points, 3))
-        return sampled
+        sampled_shapes = shapes[idx]
+        sampled_AA = aas[idx]
+        assertAllOfSize([sampled, sampled_shapes, sampled_AA], (num_points, 3))
+        return sampled, sampled_shapes, sampled_AA
     
 
 def protein_to_masked_point_cloud(atom_sites: pd.DataFrame, num_points: int):
@@ -157,12 +222,11 @@ def create_protein_point_clouds(name, num_points=2048, overwrite=False):
             atom_sites = pd.read_parquet(filename)
             for id, group in atom_sites.groupby("protein_id"):
                 group = one_per_amino_acid(group)
-                group = point_cloud_method_by_name[name](group, num_points=num_points)
-                if group.shape[0]==0:
+                atoms, shapes, aas = point_cloud_method_by_name[name](group, num_points=num_points)
+                if atoms is None:
                     print("no points, skipping")
                     continue
-                else:
-                    all_point_clouds.append(ProteinPointCloud(id, group, group.shape[0]))
+                all_point_clouds.append(ProteinPointCloud(id, atoms, shapes, aas, group.shape[0]))
 
         all_point_clouds = [p.get_w_label(labels.protein_to_labels, n_categories) for p in all_point_clouds]
         all_point_clouds_w_labels = [p for p in all_point_clouds if p.labels.sum() > 0]
@@ -318,12 +382,12 @@ class ProteinsExtended(Dataset):
         
 class ProteinsExtendedWithMask(Dataset):
     def __init__(self, num_points, partition='train'):
-        self.name = "confidence_mask_new_child_labels"
+        self.name = "confidence_mask_new_child_labels_shape_and_aminos"
         self.num_label_categories = 312
         self.num_points = num_points
         self.partition = partition
         self.max_points = 4000
-        self.id, self.data, self.label = self.load_data_cls(partition)
+        self.id, self.data, self.shapes, self.amino_acids, self.seqvec, self.seqlengths, self.label = self.load_data_cls(partition)
         self.augment_data = self.partition in ('train', 'all_with_labels')
         print(f"partition `{partition}`, augment_data with rotation when get item called: {self.augment_data}")
         
@@ -331,20 +395,30 @@ class ProteinsExtendedWithMask(Dataset):
         if not os.path.exists(DATA_DIR):
             raise Exception("first download structure_files into project root")
         create_protein_point_clouds(name=self.name, num_points=self.max_points, overwrite=overwrite)
-        all_id, all_data, all_label = read_point_clouds_w_labels_as_hd5f(name=self.name, partition=partition)
+        all_id, all_data, all_shapes, all_amino_acids, all_seqlengths, all_label = read_point_clouds_w_labels_as_hd5f(name=self.name, partition=partition)
+        
+        # add seqvec to data 
+        with open(f"{DATA_DIR}/seqvec_vectors.pkl", "rb") as fh:
+            seqvec = pickle.load(fh)[["protein_id", "seqvec"]].set_index("protein_id").seqvec.to_dict()
+            all_seqvec = [seqvec[p.decode("utf-8")] for p in all_id]
+        
         print(all_id.shape)
         print(all_data.shape)
         print(all_label.shape)
-        return all_id, all_data, all_label
+        return all_id, all_data,  all_shapes, all_amino_acids, all_seqvec, all_seqlengths, all_label
 
 
     def __getitem__(self, item):
         _id = self.id[item]
+        amino_acids = self.amino_acids[item]
+        shapes = self.shapes[item]
+        seqvec = self.seqvec[item]
         pointcloud = self.data[item]
+        seqlen = self.seqlengths[item]
         label = self.label[item]
         if self.augment_data:
             pointcloud = rotate_pointcloud(pointcloud)
-        return _id, pointcloud, label
+        return _id, pointcloud, shapes, amino_acids, seqvec, seqlen, label
 
     def __len__(self):
         return self.data.shape[0]
@@ -354,5 +428,6 @@ point_cloud_method_by_name = {
     "sampled": protein_to_sampled_point_cloud,
     "sequence_head": protein_to_sampled_point_cloud,
     "confidence_mask_new_labels": protein_to_masked_point_cloud,
-    "confidence_mask_new_child_labels": protein_to_masked_point_cloud
+    "confidence_mask_new_child_labels": protein_to_masked_point_cloud,
+    'confidence_mask_new_child_labels_shape_and_aminos': protein_to_masked_point_cloud,
 }

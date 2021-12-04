@@ -8,7 +8,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
 from .curvenet_util import *
-
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 curve_config = {
         'default': [[50, 10], [50, 10], None, None],
@@ -39,10 +39,10 @@ class CurveNet(nn.Module):
         self.cic42 = CIC(npoint=64, radius=1, k=k, in_channels=512, output_channels=512, bottleneck_ratio=4, mlp_num=1, curve_config=curve_config[setting][3])
 
         self.conv0 = nn.Sequential(
-            nn.Conv1d(512, 512, kernel_size=1, bias=False),
-            nn.BatchNorm1d(512),
+            nn.Conv1d(512, 256, kernel_size=1, bias=False),
+            nn.BatchNorm1d(256),
             nn.ReLU(inplace=True))
-        self.conv01 = nn.Linear(512 * 2, 512 * 2, bias=True)
+        self.conv01 = nn.Linear(1024 + 512, 512 * 2, bias=True)
         self.conv1 = nn.Linear(512 * 2, 512 * 2, bias=False)
         self.conv2 = nn.Linear(512 * 2, num_classes)
         self.bn01 = nn.BatchNorm1d(1024)
@@ -55,7 +55,7 @@ class CurveNet(nn.Module):
         indices = torch.argsort(torch.rand(*x.shape), dim=-1)
         return xyz[torch.arange(xyz.shape[0]).unsqueeze(-1), indices]
 
-    def forward(self, xyz):
+    def forward(self, xyz, seqvec):
         # shuffled = torch.swapaxes(self.shuffle(torch.swapaxes(xyz, 1, 2)), 1, 2)
         l0_points = self.lpfa(xyz, xyz)
 
@@ -74,7 +74,7 @@ class CurveNet(nn.Module):
         x = self.conv0(l4_points)
         x_max = F.adaptive_max_pool1d(x, 1)
         x_avg = F.adaptive_avg_pool1d(x, 1)
-        x = torch.cat((x_max, x_avg), dim=1).squeeze(-1)
+        x = torch.cat((torch.cat((x_max, x_avg), dim=1).squeeze(-1), seqvec), dim=1)
         
         x = F.relu(self.bn01(self.conv01(x).unsqueeze(-1)), inplace=True).squeeze(-1)
         x = self.dp01(x)
@@ -84,26 +84,152 @@ class CurveNet(nn.Module):
         x = self.conv2(x)
         return x, latent_feat
     
-class CurveNetWithLSTMHead(CurveNet):
-    def __init__(self, num_classes=40, k=20, num_input_to_curvenet=1024, setting='default'):
-        super(CurveNetWithLSTMHead, self).__init__(num_classes, k, num_input_to_curvenet, setting)
-        self.lstm_head = nn.LSTM(input_size=3, hidden_size=1, num_layers=1, bidirectional=True)
-        self.linear1 = nn.Linear(2048, num_input_to_curvenet)
+# class LSTMWithMetadata(nn.Module):
+#     def __init__(self, num_classes=40, k=20, num_input_to_curvenet=1024, pack=True):
+#         # super(CurveNetWithLSTMHead, self).__init__(num_classes, k, num_input_to_curvenet, setting)
+#         super(LSTMWithMetadata, self).__init__()
         
-    def choose_n_points(self, xyz):
-        # (batch, 3, n_points) -> (batch, n_points, 3)
-        xyz = torch.swapaxes(xyz, 1, 2)
-        lstm_out, lstm_grad = self.lstm_head(xyz)
-        # flatten bidirectional output to two features per point
-        # input one hidden layer to extract single value per point
-        out = self.linear1(torch.flatten(lstm_out, start_dim=1))
+#         factory_kwargs = {'dtype': torch.float}
+#         self.num_shapes = 9
+#         self.num_aminos = 21
+#         self.input_size = 3 + self.num_shapes + self.num_aminos
+#         self.num_lstm_layers = 3
+#         self.lstm_hidden = 10
+#         self.num_input_to_curvenet = num_input_to_curvenet
+#         self.pack = pack
         
-        # gather top values to move on to curvenet
-        topk_val, topk_ind = torch.topk(out, self.num_input_to_curvenet, dim=1)
-        topk_points = torch.gather(xyz, 1, topk_ind.unsqueeze(-1).repeat(1, 1, 3))
-        shuffled = self.shuffle(topk_points)
-        return torch.swapaxes(shuffled, 1, 2)
+#         self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=self.lstm_hidden, num_layers=self.num_lstm_layers, bidirectional=True, batch_first=True)
+        
+#         self.projection_size = 3
+#         self.project = nn.Parameter(torch.empty((self.lstm_hidden*2, self.projection_size), **factory_kwargs), requires_grad=True)
+#         nn.init.xavier_uniform_(self.project)
+        
+#         self.fcn1 = nn.Sequential(
+#             nn.Linear(num_input_to_curvenet * self.projection_size, 256, bias=False),
+#             nn.ReLU(inplace=True),
+#             nn.BatchNorm1d(256),
+#             nn.Dropout(0.5),)
+#         self.fcn2 = nn.Sequential(
+#             nn.Linear(256 + 1024, 1024, bias=False),
+#             nn.ReLU(inplace=True),
+#             nn.BatchNorm1d(1024),
+#             nn.Dropout(0.5),)
+#         self.fcn3 = nn.Sequential(
+#             nn.Linear(1024, 512, bias=False),
+#             nn.ReLU(inplace=True),
+#             nn.BatchNorm1d(512),
+#             nn.Dropout(0.5),)
+#         self.fcn4 = nn.Linear(512, num_classes)
     
-    def forward(self, xyz):
-        xyz = self.choose_n_points(xyz)
-        return super(CurveNetWithLSTMHead, self).forward(xyz)
+#     def forward(self, struct_features, sorted_lengths, seqvec):
+#         x = struct_features
+#         if self.pack:
+#             struct_features_packed = pack_padded_sequence(struct_features.cpu(), sorted_lengths.cpu(), batch_first=True, enforce_sorted=True)
+#             x = struct_features_packed.cuda().float()
+        
+#         x, _ = self.lstm(x) # (Batch, SeqLen, self.lstm_hidden*2)
+#         x, lengths = pad_packed_sequence(x, batch_first=True, total_length=self.num_input_to_curvenet)
+#         x = torch.matmul(x, self.project) # (Batch, SeqLen, proj_size)
+#         x = torch.flatten(x, start_dim=1) # (Batch, SeqLen * proj_size)
+#         x = self.fcn1(x)
+#         x = torch.cat((x, seqvec), dim=1).squeeze(-1)
+#         latent_feat = self.fcn2(x)
+#         x = self.fcn3(latent_feat)
+#         x = self.fcn4(x)
+#         return x, None
+    
+class LSTMWithMetadata(nn.Module):
+    def __init__(self, num_classes=40, k=20, num_input_to_curvenet=1024, pack=True, embedding=False):
+        super(LSTMWithMetadata, self).__init__()
+        
+        factory_kwargs = {'dtype': torch.float}
+        self.embedding = embedding
+        self.pack = pack
+        
+        self.num_shapes = 9
+        self.shape_embedding_size = 3
+        self.num_aminos = 21
+        self.amino_embedding_size = 4
+        self.input_size = (3 + self.shape_embedding_size + self.amino_embedding_size) if embedding else (3 + self.num_shapes + self.num_aminos)
+        self.num_lstm_layers = 4 if self.embedding else 6
+        self.lstm_hidden = 32 if embedding else 10
+        self.num_input_to_curvenet = num_input_to_curvenet
+        
+        if self.embedding:
+            self.shape_embedding = nn.Embedding(self.num_shapes, self.shape_embedding_size)
+            self.amino_embedding = nn.Embedding(self.num_aminos, self.amino_embedding_size)
+        
+        self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=self.lstm_hidden, num_layers=self.num_lstm_layers, bidirectional=True, batch_first=True)
+        
+        self.projection_size = 4
+        self.project = nn.Parameter(torch.empty((self.lstm_hidden*2, self.projection_size), **factory_kwargs), requires_grad=True)
+        nn.init.xavier_uniform_(self.project)
+        
+        self.fcn1 = nn.Sequential(
+            nn.Linear(num_input_to_curvenet * self.projection_size, 256, bias=False),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.5),)
+        fc2_input = (self.num_lstm_layers * 2 * self.lstm_hidden) if embedding else 256
+        self.fcn2 = nn.Sequential(
+            nn.Linear(fc2_input + 1024, 512, bias=False),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.5),)
+        self.fcn3 = nn.Sequential(
+            nn.Linear(512, 512, bias=False),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.5),)
+        self.fcn4 = nn.Sequential(
+            nn.Linear(512, 512, bias=False),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.5),)
+        self.fcn5 = nn.Sequential(
+            nn.Linear(512, 512, bias=False),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.5),)
+        self.fcn6 = nn.Linear(512, num_classes)
+    
+    def forward(self, xyz, shapes, aminos, sorted_lengths, seqvec):
+        if self.pack:
+            if self.embedding:
+                # xyz_packed = pack_padded_sequence(xyz.cpu(), sorted_lengths.cpu(), batch_first=True, enforce_sorted=True).cuda()
+                # shapes_packed = pack_padded_sequence(shapes.cpu(), sorted_lengths.cpu(), batch_first=True, enforce_sorted=True).cuda()
+                # aminos_packed = pack_padded_sequence(aminos.cpu(), sorted_lengths.cpu(), batch_first=True, enforce_sorted=True).cuda()
+
+                shapes_emb = self.shape_embedding(shapes)
+                aminos_emb = self.amino_embedding(aminos)
+                struct_features = torch.cat((xyz, shapes_emb, aminos_emb), dim=2)
+            
+            else:
+                shapes_onehot = F.one_hot(shapes, self.num_shapes)
+                aminos_onehot = F.one_hot(aminos, self.num_aminos)
+                struct_features = torch.cat((xyz, shapes_onehot, aminos_onehot), dim=2)
+            
+            struct_features_packed = pack_padded_sequence(struct_features.cpu(), sorted_lengths.cpu(), batch_first=True, enforce_sorted=True)
+            x = struct_features_packed.cuda().float()
+        
+        x, (h_n, c_n) = self.lstm(x) # (Batch, SeqLen, self.lstm_hidden*2)
+        
+        # embedding 
+        if self.embedding:                                   
+            x = torch.cat((torch.flatten(torch.permute(h_n, [1, 0, 2]), start_dim=1), seqvec), dim=1).squeeze(-1)
+        
+        # onehot
+        else:
+            x, lengths = pad_packed_sequence(x, batch_first=True, total_length=self.num_input_to_curvenet)
+            x = torch.matmul(x, self.project) # (Batch, SeqLen, proj_size)
+            x = torch.flatten(x, start_dim=1) # (Batch, SeqLen * proj_size)
+            x = self.fcn1(x)
+            x = torch.cat((x, seqvec), dim=1)
+
+        fc2_out = self.fcn2(x)
+        fc3_out = self.fcn3(fc2_out)
+        fc4_out = self.fcn4(fc3_out)
+        fc5_out = self.fcn5(fc4_out)
+        x = self.fcn6(fc5_out)
+        return x, torch.cat((fc4_out, fc5_out), dim=1)
+    

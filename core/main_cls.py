@@ -19,14 +19,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR, CosineAnnealingWarmRestarts
 from data import ProteinsSampled, ProteinsExtended, ProteinsExtendedWithMask, load_labels
-from models.curvenet_cls import CurveNet, CurveNetWithLSTMHead
+from models.curvenet_cls import CurveNet, LSTMWithMetadata
 import numpy as np
 from torch.utils.data import DataLoader
 from util import cal_loss, IOStream, evaluate
 import sklearn.metrics as metrics
-
+from torchsummary import summary
+from torch.nn.utils.rnn import pack_padded_sequence
+from tqdm import tqdm
 
 def _init_():
     # fix random seed
@@ -37,7 +39,7 @@ def _init_():
     torch.set_printoptions(10)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ['PYTHONHASHSEED'] = str(6279)
 
     # prepare file structures
     if not os.path.exists('../checkpoints'):
@@ -49,7 +51,43 @@ def _init_():
     os.system('cp main_cls.py ../checkpoints/'+args.exp_name+'/main_cls.py.backup')
     os.system('cp models/curvenet_cls.py ../checkpoints/'+args.exp_name+'/curvenet_cls.py.backup')
 
+
+def sort_length_indices(lengths):
+    sorted_lengths, sorted_indices = torch.sort(lengths, descending=True)
+    sorted_indices = sorted_indices.to(lengths.device)
+    return sorted_lengths, sorted_indices
+
+
+def reorder_batch_by_length(tensor_input, sorted_indices):
+    return tensor_input.index_select(0, sorted_indices)
+
+
+def to_packed_sequence(tensor_input, sorted_lengths, sorted_indices):
+    return pack_padded_sequence(reorder_batch_by_length(tensor_input, sorted_indices), sorted_lengths, batch_first=True, enforce_sorted=True)
     
+    
+def to_input_tensors(_id, xyz, shapes, aminos, seqvec, lengths, multihot_label, device):
+    # _shapes = F.one_hot(shapes.long(), 9)
+    # _amino_acids = F.one_hot(amino_acids.long(), 21)
+
+    sorted_lengths, length_indices_sorted = sort_length_indices(lengths)
+    sorted_lengths = torch.clip(sorted_lengths, max=args.num_points)
+    
+    _id = np.array(_id)[length_indices_sorted.cpu().numpy()]
+
+    xyz, shapes, aminos, seqvec, multihot_label = [reorder_batch_by_length(_tensor, length_indices_sorted) for _tensor in [xyz, shapes, aminos, seqvec, multihot_label]]
+
+    xyz, shapes, aminos, seqvec, multihot_label = (
+        xyz.to(dtype=torch.float), 
+        shapes.to(dtype=torch.long), 
+        aminos.to(dtype=torch.long), 
+        seqvec.to(device, dtype=torch.float), 
+        multihot_label.to(device)
+    )
+
+    return _id, xyz, shapes, aminos, seqvec, multihot_label, sorted_lengths
+        
+
 def train(args, io):
     train_loader = DataLoader(ProteinsExtendedWithMask(partition='train', num_points=args.num_points), num_workers=8,
                               batch_size=args.batch_size, shuffle=True, drop_last=True)
@@ -60,6 +98,7 @@ def train(args, io):
     io.cprint("Let's use" + str(torch.cuda.device_count()) + "GPUs!")
 
     # create model
+
     labelsData = load_labels()
     
     num_classes = labelsData.num_unique
@@ -69,8 +108,12 @@ def train(args, io):
     icvec = torch.from_numpy(icvec_np).to(device)
     pos_weights = torch.from_numpy(labelsData.pos_weights).to(device)
     
-    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
+    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, embedding=False).to(device, dtype=torch.float)
     model = nn.DataParallel(model)
+    if args.model_path:
+        print("warm starting with {args.model_path}")
+        model.load_state_dict(torch.load(args.model_path, map_location=device))
+    # print(summary(model, [(32, 4000,3), (32,4000,9), (32, 4000,21), (32, 4000, 1024)]))
 
     if args.use_sgd:
         io.cprint("Use SGD")
@@ -80,28 +123,30 @@ def train(args, io):
         opt = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     if args.scheduler == 'cos':
-        scheduler = CosineAnnealingLR(opt, args.epochs, eta_min=1e-3)
+        scheduler = CosineAnnealingWarmRestarts(opt, T_0=args.epochs//2, eta_min=1e-3)
     elif args.scheduler == 'step':
         scheduler = MultiStepLR(opt, [120, 160], gamma=0.1)
     
     criterion = lambda x, y: cal_loss(x, y, smoothing=0.0, label_weights=icvec, pos_weights=pos_weights)
 
-    best_test_fmax = 0
+    best_test_loss = float("inf")
+    best_metrics = None
     for epoch in range(args.epochs):
         ####################
         # Train
-        ####################
+        ########s############
         train_loss = 0.0
         count = 0.0
         model.train()
         train_prob = []
         train_true = []
-        for _id, data, multihot_label in train_loader:
-            data, multihot_label = data.to(device, dtype=torch.float), multihot_label.to(device)
-            data = data.permute(0, 2, 1)
+        for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm(train_loader):
+
+            _id, xyz, shapes, aminos, seqvec, multihot_label, sorted_lengths = to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label, device)
+        
             batch_size = data.size()[0]
             opt.zero_grad()
-            logits = model(data)[0]
+            logits = model(xyz, shapes, aminos, sorted_lengths, seqvec)[0]
             probs = torch.sigmoid(logits)
             loss = criterion(logits, multihot_label)
             loss.backward()
@@ -136,11 +181,12 @@ def train(args, io):
         test_prob = []
         test_true = []
         with torch.no_grad():   # set all 'requires_grad' to False
-            for _id, data, multihot_label in test_loader:
-                data, multihot_label = data.to(device, dtype=torch.float), multihot_label.to(device)
-                data = data.permute(0, 2, 1)
+            for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm(test_loader):
+                
+                _id, xyz, shapes, aminos, seqvec, multihot_label, sorted_lengths = to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label, device)
+                
                 batch_size = data.size()[0]
-                logits = model(data)[0]
+                logits = model(xyz, shapes, aminos, sorted_lengths, seqvec)[0]
                 probs = torch.sigmoid(logits)
                 loss = criterion(logits, multihot_label)
                 count += batch_size
@@ -150,14 +196,14 @@ def train(args, io):
             test_true = np.concatenate(test_true)
             test_prob = np.concatenate(test_prob)
         
-        test_eval_metrics = evaluate(test_true, test_prob, icvec_np, nth=10)
+        test_eval_metrics = evaluate(test_true, test_prob, icvec_np, nth=50)
         outstr = 'Test %d, loss: %.6f, ' % (epoch, test_loss*1.0/count) + "test metrics: {}".format({k: "%.6f" % v for k, v in test_eval_metrics.items()})
         io.cprint(outstr)
-        test_fmax = test_eval_metrics['avg_fmax']
-        if test_fmax >= best_test_fmax:
-            best_test_fmax = test_fmax
+        if test_loss*1.0/count <= best_test_loss:
+            best_test_loss = test_loss*1.0/count
+            best_metrics = test_eval_metrics
             torch.save(model.state_dict(), '../checkpoints/%s/models/model.t7' % args.exp_name)
-        io.cprint('best: %.3f' % best_test_fmax)
+        io.cprint('best: %.4f, ' % best_test_loss + "test metrics: {}".format({k: "%.6f" % v for k, v in best_metrics.items()}))
 
         
 def test(args, io):
@@ -167,7 +213,7 @@ def test(args, io):
     device = torch.device("cuda" if args.cuda else "cpu")
 
     #Try to load models
-    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
+    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points).to(device)
     model = nn.DataParallel(model)
     model.load_state_dict(torch.load(args.model_path))
 
@@ -208,7 +254,7 @@ def train_all(args, io):
     icvec = torch.from_numpy(icvec_np).to(device)
     pos_weights = torch.from_numpy(labelsData.pos_weights).to(device)
     
-    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, device=device).to(device)
+    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, embedding=False).to(device, dtype=torch.float)
     model = nn.DataParallel(model)
 
     if args.use_sgd:
@@ -219,7 +265,7 @@ def train_all(args, io):
         opt = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     if args.scheduler == 'cos':
-        scheduler = CosineAnnealingLR(opt, args.epochs, eta_min=1e-3)
+        scheduler = CosineAnnealingWarmRestarts(opt, T_0=args.epochs//2, eta_min=1e-3)
     elif args.scheduler == 'step':
         scheduler = MultiStepLR(opt, [120, 160], gamma=0.1)
     
@@ -234,12 +280,13 @@ def train_all(args, io):
         model.train()
         train_prob = []
         train_true = []
-        for _id, data, multihot_label in train_loader:
-            data, multihot_label = data.to(device, dtype=torch.float), multihot_label.to(device)
-            data = data.permute(0, 2, 1)
+        for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm(train_loader):
+            
+            _id, xyz, shapes, aminos, seqvec, multihot_label, sorted_lengths = to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label, device)
+            
             batch_size = data.size()[0]
             opt.zero_grad()
-            logits = model(data)[0]
+            logits = model(xyz, shapes, aminos, sorted_lengths, seqvec)[0]
             probs = torch.sigmoid(logits)
             loss = criterion(logits, multihot_label)
             loss.backward()
@@ -276,7 +323,7 @@ def embed(args, io):
     device = torch.device("cuda" if args.cuda else "cpu")
     num_classes = all_loader.dataset.num_label_categories
     #Try to load models
-    model = CurveNet(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, device=device).to(device)
+    model = LSTMWithMetadata(k=16, num_classes=num_classes, num_input_to_curvenet=args.num_points, embedding=False).to(device, dtype=torch.float)
     model = nn.DataParallel(model)
     model.load_state_dict(torch.load(args.model_path, map_location=device))
 
@@ -286,17 +333,17 @@ def embed(args, io):
     _embeddings = []
     _probs = []
     _labels = []
-    for protein_id, data, label in tqdm.tqdm(all_loader):
-        data, label = data.float().to(device), label.to(device).squeeze()
-        data = data.permute(0, 2, 1)
+    for _id, data, shapes, amino_acids, seqvec, lengths, multihot_label in tqdm(all_loader):
+        _id, xyz, shapes, aminos, seqvec, multihot_label, sorted_lengths = to_input_tensors(_id, data, shapes, amino_acids, seqvec, lengths, multihot_label, device)
+        
         batch_size = data.size()[0]
-        logits, embs = model(data)
+        logits, embs = model(xyz, shapes, aminos, sorted_lengths, seqvec)
         probs = torch.sigmoid(logits)
         
-        _protein_ids.append(protein_id)
+        _protein_ids.append(_id)
         _embeddings.append(embs.detach().cpu().numpy())
         _probs.append(probs.detach().cpu().numpy())
-        _labels.append(label.detach().cpu().numpy())
+        _labels.append(multihot_label.detach().cpu().numpy())
     
     protein_ids = np.concatenate(_protein_ids)
     embeddings = np.concatenate(_embeddings)
@@ -322,7 +369,7 @@ if __name__ == "__main__":
                         help='Size of batch)')
     parser.add_argument('--test_batch_size', type=int, default=16, metavar='batch_size',
                         help='Size of batch)')
-    parser.add_argument('--epochs', type=int, default=200, metavar='N',
+    parser.add_argument('--epochs', type=int, default=100, metavar='N',
                         help='number of episode to train ')
     parser.add_argument('--use_sgd', type=str2bool, default=True,
                         help='Use SGD')
